@@ -36,19 +36,19 @@ st.sidebar.header("Финансовые показатели")
 
 # We set your current hardcoded values as the 'value' (the default)
 gen_power_input = st.sidebar.number_input(
-    "Generating Power Rate (Ставка за мощность)", 
+    "Генераторная (покупная) мощность, руб/Мвт", 
     value=1132614.35, 
     format="%.2f"
 )
 
 gen_change_input = st.sidebar.number_input(
-    "Generating Change Rate (Ставка за энергию)", 
+    "Ставка за управление, руб/Мвт", 
     value=1317.3, 
     format="%.2f"
 )
 
 network_rate_input = st.sidebar.number_input(
-    "Network Capacity Rate (Сетевой тариф)", 
+    "Ставка за содержание сетей,руб/Мвт", 
     value=2487916.6, 
     format="%.2f"
 )
@@ -153,7 +153,7 @@ u_input = st.file_uploader("Выбрать файл с данными потре
 u_price = st.file_uploader("Выбрать файл с почасовыми тарифами (xlsx)", type=["xlsx"])
 
 if u_input and u_price:
-    if st.button("🚀 Симуляция в процессе"):
+    if st.button("🚀 Симулируем"):
         with st.spinner("Рассчитываем сценарии..."):
             # Load Data
             df_raw = pd.read_excel(u_input)
