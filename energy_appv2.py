@@ -25,18 +25,38 @@ def password_entered():
 if not check_password():
     st.stop()  # Do not run the rest of the app
 
-# ... REST OF YOUR EXISTING CODE STARTS HERE ...
+
 
 # --- 1. INTERFACE SETUP ---
 st.set_page_config(page_title="Расчет оптимального потребления", layout="wide")
 st.title("🔋 Расчет оптимального потребления с помощью батареи")
 
-# --- 2. SIDEBAR PARAMETERS (User controllable) ---
-st.sidebar.header("Financial Rates")
-generating_power = st.sidebar.number_input("Генераторная (покупная) мощность (руб/Мвт)", value=1132614.35)
-generating_change = st.sidebar.number_input("Ставка за управление изменением режима потребления (руб/Мвт)", value=1317.3)
-network_rate = st.sidebar.number_input("Ставка за содержание сетей (руб/Мвт)", value=2487916.6)
+# --- SIDEBAR INPUTS ---
+st.sidebar.header("Финансовые показатели")
 
+# We set your current hardcoded values as the 'value' (the default)
+gen_power_input = st.sidebar.number_input(
+    "Generating Power Rate (Ставка за мощность)", 
+    value=1132614.35, 
+    format="%.2f"
+)
+
+gen_change_input = st.sidebar.number_input(
+    "Generating Change Rate (Ставка за энергию)", 
+    value=1317.3, 
+    format="%.2f"
+)
+
+network_rate_input = st.sidebar.number_input(
+    "Network Capacity Rate (Сетевой тариф)", 
+    value=2487916.6, 
+    format="%.2f"
+)
+
+# Now, we use these inputs to calculate our constants
+TOTAL_RATE_RUB_M_WH = gen_power_input + gen_change_input
+NETWORK_CAPACITY_RATE = network_rate_input
+KW_TO_MWH = 1 / 1000
 # Internal Constants
 TOTAL_RATE_RUB_M_WH = generating_power + generating_change
 NETWORK_CAPACITY_RATE = network_rate
