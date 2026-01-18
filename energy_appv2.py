@@ -57,10 +57,6 @@ network_rate_input = st.sidebar.number_input(
 TOTAL_RATE_RUB_M_WH = gen_power_input + gen_change_input
 NETWORK_CAPACITY_RATE = network_rate_input
 KW_TO_MWH = 1 / 1000
-# Internal Constants
-TOTAL_RATE_RUB_M_WH = generating_power + generating_change
-NETWORK_CAPACITY_RATE = network_rate
-KW_TO_MWH = 1 / 1000
 
 MODULE_COUNTS = [5, 6, 7, 8]
 MODULE_KWH = 14.6
