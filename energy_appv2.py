@@ -205,20 +205,32 @@ def calculate_success_rate(df_scenario, mask):
     return round((zeros_achieved / total_green_hours) * 100, 2) if total_green_hours > 0 else 100.0
 
 def calculate_network_charge_average(df_scenario, current_biz_mask, hr_cols):
-    # Filter for business days
-    biz_data = df_scenario[current_biz_mask]
+    """
+    Calculates the average of daily maximums during assessment hours.
+    """
+    # 1. Filter only for Business Days
+    biz_data = df_scenario[current_biz_mask].copy()
     
-    # Ensure we are ONLY looking at the hours defined in our dynamic ALL_ASSESS
+    if biz_data.empty or not ALL_ASSESS:
+        return 0.0, 0.0
+
+    # 2. Map ALL_ASSESS (indices) to your string column names (e.g., '7.00-8.00')
     assessment_col_names = [hr_cols[h] for h in ALL_ASSESS]
     
-    # 1. Find the MAX for each day within the assessment hours
-    daily_max_kw = biz_data[assessment_col_names].max(axis=1)
+    # 3. Calculate the MAX value for EACH day within those specific columns
+    # axis=1 tells pandas to find the max across the columns for every row
+    daily_max_series = biz_data[assessment_col_names].max(axis=1)
     
-    # 2. Average those daily maximums
-    avg_peak_kw = daily_max_kw.mean()
-    avg_peak_mw = avg_peak_kw * KW_TO_MWH
+    # 4. Calculate the MEAN (average) of those daily peaks
+    avg_peak_kw = daily_max_series.mean()
     
-    return round(avg_peak_mw * NETWORK_CAPACITY_RATE, 2), round(avg_peak_mw, 4)
+    # 5. Convert to MW for the financial calculation
+    avg_peak_mw = avg_peak_kw / 1000 
+    
+    # 6. Calculate the final RUB charge
+    total_network_charge = round(avg_peak_mw * NETWORK_CAPACITY_RATE, 2)
+    
+    return total_network_charge, round(avg_peak_mw, 4)
     
 def calculate_total_energy_cost(df_scenario, df_prices, hour_columns):
     total_rubles = 0
