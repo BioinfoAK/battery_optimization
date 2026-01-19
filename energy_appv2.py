@@ -114,22 +114,35 @@ def get_target_mask_from_ref(df_baseline, ref_path):
     except Exception as e:
         st.error(f"Ошибка загрузки маски: {e}")
         return None
+
 def get_assessment_hours(ref_path, month_col):
     """
-    Reads assessment_hours.xlsx and returns the list of active hours 
-    for the selected month column (e.g., 'nov25').
+    Читает assessment_hours.xlsx и возвращает список активных часов.
+    Обрабатывает форматы '7', 7, '07:00' или '07:00-08:00'.
     """
     try:
         df_assess = pd.read_excel(ref_path)
         
         if month_col in df_assess.columns:
-            # Get the hours, dropping any empty cells in that month's column
-            active_hours = df_assess[month_col].dropna().unique().tolist()
-            # Convert to integers for the optimizer
-            return [int(h) for h in active_hours]
+            raw_hours = df_assess[month_col].dropna().unique().tolist()
+            active_hours = []
+            
+            for h in raw_hours:
+                h_str = str(h).strip()
+                # Если формат '07:00-08:00', берем первые два символа '07'
+                if ":" in h_str:
+                    hour_val = int(h_str.split(":")[0])
+                # Если это просто число или строка с числом
+                else:
+                    hour_val = int(float(h_str))
+                
+                if 0 <= hour_val <= 23:
+                    active_hours.append(hour_val)
+            
+            return sorted(active_hours)
         else:
             st.error(f"Колонку '{month_col}' не нашли в assessment_hours.xlsx")
-            return [7, 8, 9, 10, 15, 16, 17, 18, 19, 20] # Default fallback
+            return [7, 8, 9, 10, 15, 16, 17, 18, 19, 20] # Фоллбэк
     except Exception as e:
         st.error(f"Ошибка загрузки часов оценки: {e}")
         return [7, 8, 9, 10, 15, 16, 17, 18, 19, 20]
