@@ -32,8 +32,17 @@ st.set_page_config(page_title="Расчет оптимального потре�
 st.title("🔋 Расчет оптимального потребления с помощью батареи")
 
 # --- SIDEBAR INPUTS ---
-st.sidebar.header("Финансовые показатели")
+st.sidebar.header("Параметры объекта")
+# User selects Region and Month
+region_choice = st.sidebar.radio("Выберите регион:", ["Samara", "Ulyanovsk"])
+month_choice = st.sidebar.selectbox("Выберите месяц:", ["Nov25", "Dec25"])
+REGION_PATH = region_choice.lower()
+MONTH_FILE = f"generating_hours_{month_choice.lower()}.xlsx"
+REF_HOURS_PATH = f"reference_data/{REGION_PATH}/hours/{MONTH_FILE}"
 
+# --- 2. HEADER DEFINITIONS ---
+# Matching your new '0.00-1.00' format
+HR_COLS = [f"{h}.00-{h+1}.00" for h in range(24)]
 # We set your current hardcoded values as the 'value' (the default)
 gen_power_input = st.sidebar.number_input(
     "Генераторная (покупная) мощность, руб/Мвт", 
@@ -83,16 +92,35 @@ def is_biz_day(dt, year):
     ru_holidays = holidays.Russia(years=[year])
     return not (dt.weekday() >= 5 or dt in ru_holidays)
 
-def get_target_mask_from_upload(uploaded_file):
-    wb = openpyxl.load_workbook(uploaded_file, data_only=True)
-    ws = wb.active
-    mask = []
-    for row in ws.iter_rows(min_row=2):
-        row_mask = {hr: (row[hr + 2].fill and hasattr(row[hr + 2].fill, 'start_color') and 
-                    row[hr + 2].fill.start_color.index not in ['00000000', 'FFFFFFFF', 0]) 
-                    for hr in range(24)}
-        mask.append(row_mask)
-    return mask
+def get_target_mask_from_ref(df_baseline, ref_path):
+    """
+    Reads the reference file from GitHub and matches the generating hour 
+    by comparing dates with the uploaded baseline file.
+    """
+    try:
+        # Load the Reference Table (Date | HourIndex)
+        df_ref = pd.read_excel(ref_path)
+        # Ensure dates are in the same format for matching
+        df_ref.iloc[:, 0] = pd.to_datetime(df_ref.iloc[:, 0], dayfirst=True)
+        
+        mask = []
+        for _, row in df_baseline.iterrows():
+            current_date = row.iloc[0] # The date in your input file
+            
+            # Find the matching date in the reference table
+            match = df_ref[df_ref.iloc[:, 0] == current_date]
+            
+            row_mask = {hr: False for hr in range(24)}
+            if not match.empty:
+                # Get the index (e.g., 11) and convert to 0-based index (10)
+                hour_idx = int(match.iloc[0, 1]) - 1
+                if 0 <= hour_idx <= 23:
+                    row_mask[hour_idx] = True
+            mask.append(row_mask)
+        return mask
+    except FileNotFoundError:
+        st.error(f"Файл не найден: {ref_path}. Проверьте наличие файла в репозитории GitHub.")
+        return None
 
 def get_gen_peak_mean(df, mask_list, current_biz_mask):
     daily_peaks = []
@@ -160,7 +188,9 @@ if u_input and u_price:
             df_raw.iloc[:, 0] = pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True)
             year = df_raw.iloc[0, 0].year
             biz_mask = df_raw.iloc[:, 0].apply(lambda x: is_biz_day(x, year))
-            target_mask_list = get_target_mask_from_upload(u_input)
+            target_mask_list = get_target_mask_from_ref(df_raw, REF_HOURS_PATH)
+            if target_mask_list is None:
+                st.stop() # Stop execution if the reference file is missing
             df_prices = pd.read_excel(u_price)
             hr_cols = df_raw.columns[2:26]
             
