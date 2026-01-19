@@ -159,11 +159,12 @@ def get_gen_peak_mean(df, mask_list, current_biz_mask):
     return np.mean(daily_peaks) if daily_peaks else 0
 
 def optimize_discharge(row_data, target_map, capacity):
-    # row_data is now just an array of 24 values
+    # row_data is the 24-hour consumption array
     discharge = {hr: 0 for hr in range(24)}
     rem = capacity
     
-    # 1. Discharge during the Target (Generating) hour
+    # --- PHASE 1: Mandatory Target (Generating) Hour ---
+    # We must hit the green hour from the mask first
     for hr in range(24):
         if target_map.get(hr, False):
             val = row_data[hr]
@@ -171,15 +172,24 @@ def optimize_discharge(row_data, target_map, capacity):
             discharge[hr] = actual
             rem -= actual
             
-    # 2. If battery still has energy, shave the peaks in ALL_ASSESS hours
-    if rem > 0.1:
-        while rem > 0.1:
-            curr_loads = {h: (row_data[h] - discharge[h]) for h in ALL_ASSESS}
-            peak_hr = max(curr_loads, key=curr_loads.get)
-            if curr_loads[peak_hr] <= 0: break
-            shave = min(0.5, rem, curr_loads[peak_hr])
-            discharge[peak_hr] += shave
-            rem -= shave
+    # --- PHASE 2: Dynamic Peak Shaving ---
+    # If energy remains, we attack the highest peaks in ALL_ASSESS
+    if rem > 0.1 and ALL_ASSESS:
+        # We loop until energy is gone or no more load to shave
+        while rem > 0.01:
+            # Find the hour in ALL_ASSESS that has the highest CURRENT load
+            # Current load = Original Load - What we already discharged
+            current_loads = {h: (row_data[h] - discharge[h]) for h in ALL_ASSESS}
+            peak_hr = max(current_loads, key=current_loads.get)
+            
+            if current_loads[peak_hr] <= 0:
+                break # No more load to shave in assessment hours
+            
+            # Shave in small increments (0.5kW) to flatten the peak evenly
+            shave_amount = min(0.5, rem, current_loads[peak_hr])
+            discharge[peak_hr] += shave_amount
+            rem -= shave_amount
+            
     return discharge
 
 def calculate_success_rate(df_scenario, mask):
@@ -195,12 +205,21 @@ def calculate_success_rate(df_scenario, mask):
     return round((zeros_achieved / total_green_hours) * 100, 2) if total_green_hours > 0 else 100.0
 
 def calculate_network_charge_average(df_scenario, current_biz_mask, hr_cols):
+    # Filter for business days
     biz_data = df_scenario[current_biz_mask]
-    assessment_cols = [hr_cols[h] for h in ALL_ASSESS]
-    avg_peak_kw = biz_data[assessment_cols].max(axis=1).mean()
+    
+    # Ensure we are ONLY looking at the hours defined in our dynamic ALL_ASSESS
+    assessment_col_names = [hr_cols[h] for h in ALL_ASSESS]
+    
+    # 1. Find the MAX for each day within the assessment hours
+    daily_max_kw = biz_data[assessment_col_names].max(axis=1)
+    
+    # 2. Average those daily maximums
+    avg_peak_kw = daily_max_kw.mean()
     avg_peak_mw = avg_peak_kw * KW_TO_MWH
+    
     return round(avg_peak_mw * NETWORK_CAPACITY_RATE, 2), round(avg_peak_mw, 4)
-
+    
 def calculate_total_energy_cost(df_scenario, df_prices, hour_columns):
     total_rubles = 0
     for idx, row in df_scenario.iterrows():
