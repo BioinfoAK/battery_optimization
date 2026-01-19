@@ -35,7 +35,7 @@ st.title("🔋 Расчет оптимального потребления с �
 st.sidebar.header("Параметры объекта")
 # User selects Region and Month
 region_choice = st.sidebar.radio("Выберите регион:", ["Samara", "Ulyanovsk"])
-month_choice = st.sidebar.selectbox("Выберите месяц:", ["Nov25", "Dec25"])
+month_choice = st.sidebar.selectbox("Выберите месяц:", ["nov25", "dec25"])
 REGION_PATH = region_choice.lower()
 MONTH_FILE = f"generating_hours_{month_choice.lower()}.xlsx"
 REF_HOURS_PATH = f"reference_data/{REGION_PATH}/hours/{MONTH_FILE}"
