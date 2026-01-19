@@ -39,6 +39,7 @@ month_choice = st.sidebar.selectbox("Выберите месяц:", ["Nov25", "D
 REGION_PATH = region_choice.lower()
 MONTH_FILE = f"generating_hours_{month_choice.lower()}.xlsx"
 REF_HOURS_PATH = f"reference_data/{REGION_PATH}/hours/{MONTH_FILE}"
+ASSESS_FILE_PATH = f"reference_data/{REGION_PATH}/hours/assessment_hours.xlsx"
 
 # --- 2. HEADER DEFINITIONS ---
 # Matching your new '0.00-1.00' format
@@ -113,7 +114,26 @@ def get_target_mask_from_ref(df_baseline, ref_path):
     except Exception as e:
         st.error(f"Ошибка загрузки маски: {e}")
         return None
-
+def get_assessment_hours(ref_path, month_col):
+    """
+    Reads assessment_hours.xlsx and returns the list of active hours 
+    for the selected month column (e.g., 'nov25').
+    """
+    try:
+        df_assess = pd.read_excel(ref_path)
+        
+        if month_col in df_assess.columns:
+            # Get the hours, dropping any empty cells in that month's column
+            active_hours = df_assess[month_col].dropna().unique().tolist()
+            # Convert to integers for the optimizer
+            return [int(h) for h in active_hours]
+        else:
+            st.error(f"Колонку '{month_col}' не нашли в assessment_hours.xlsx")
+            return [7, 8, 9, 10, 15, 16, 17, 18, 19, 20] # Default fallback
+    except Exception as e:
+        st.error(f"Ошибка загрузки часов оценки: {e}")
+        return [7, 8, 9, 10, 15, 16, 17, 18, 19, 20]
+        
 def get_gen_peak_mean(df, mask_list, current_biz_mask):
     daily_peaks = []
     # Use the HR_COLS list we defined at the top
@@ -197,7 +217,7 @@ if u_input and u_price:
             
             # 2. Setup Masks and Columns
             biz_mask = df_raw.iloc[:, 0].apply(lambda x: is_biz_day(x, year))
-            
+        
             # Using the path constructed from your Region/Month buttons
             target_mask_list = get_target_mask_from_ref(df_raw, REF_HOURS_PATH)
             
@@ -209,7 +229,8 @@ if u_input and u_price:
             # USE THE STRING LIST DEFINED AT TOP INSTEAD OF SLICING
             # HR_COLS = ["0.00-1.00", "1.00-2.00", ...]
             hr_cols = HR_COLS 
-            
+            ALL_ASSESS = get_assessment_hours(ASSESS_FILE_PATH, month_choice)
+            st.caption(f"Часы оценки (Peak Shaving) для {month_choice}: {ALL_ASSESS}")
             summary_results = []
             excel_data = {} 
 
