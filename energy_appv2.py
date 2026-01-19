@@ -71,9 +71,6 @@ KW_TO_MWH = 1 / 1000
 MODULE_COUNTS = [5, 6, 7, 8]
 MODULE_KWH = 14.6
 LOSS_FACTOR = 1.10
-ALL_ASSESS = [7, 8, 9, 10, 15, 16, 17, 18, 19, 20]
-NIGHT_WINDOW = [0, 1, 2, 3, 4, 5, 6]
-GAP_WINDOW = [11, 12, 13, 14]
 
 COLUMN_NAMES_RU = {
     "Setup": "Конфигурация",
@@ -269,12 +266,29 @@ if u_input and u_price:
                 st.stop() 
 
             df_prices = pd.read_excel(u_price)
-            
-            # USE THE STRING LIST DEFINED AT TOP INSTEAD OF SLICING
-            # HR_COLS = ["0.00-1.00", "1.00-2.00", ...]
+            # ... Data loading above ...
             hr_cols = HR_COLS 
+            
+            # --- START PASTE 1 HERE ---
+            # 1. Dynamically load Assessment Hours
             ALL_ASSESS = get_assessment_hours(ASSESS_FILE_PATH, month_choice)
-            st.caption(f"Часы оценки (Peak Shaving) для {month_choice}: {ALL_ASSESS}")
+            st.caption(f"📊 Часы оценки (Peak Shaving) для {month_choice}: {ALL_ASSESS}")
+
+            # 2. DYNAMICALLY DEFINE RECHARGE WINDOWS
+            first_peak = min(ALL_ASSESS) if ALL_ASSESS else 7
+            DYN_NIGHT_WINDOW = [h for h in range(0, first_peak)]
+
+            morning_peaks = [h for h in ALL_ASSESS if h < 13]
+            evening_peaks = [h for h in ALL_ASSESS if h >= 13]
+
+            if morning_peaks and evening_peaks:
+                DYN_GAP_WINDOW = [h for h in range(max(morning_peaks) + 1, min(evening_peaks)) if h not in ALL_ASSESS]
+            else:
+                DYN_GAP_WINDOW = [h for h in range(12, 15) if h not in ALL_ASSESS]
+
+            st.caption(f"🔌 Окна зарядки: Ночь {DYN_NIGHT_WINDOW}, Перерыв {DYN_GAP_WINDOW}")
+            # --- END PASTE 1 ---
+
             summary_results = []
             excel_data = {} 
 
@@ -309,26 +323,30 @@ if u_input and u_price:
                 for idx, row in df_sim.iterrows():
                     if not biz_mask[idx]: continue
                     
-                    # Get hourly prices for this day
                     price_row = df_prices[df_prices.iloc[:,0] == row.iloc[0].day].iloc[0, 1:].values
-                    
-                    # Pass the 24-hour values only to the optimizer
                     d_map = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap)
                     
-                    # Logic for charging during cheap hours
-                    c_night = sorted(NIGHT_WINDOW, key=lambda h: price_row[h])[:2]
-                    c_gap = sorted(GAP_WINDOW, key=lambda h: price_row[h])[:2]
-                    v_night = sum(d_map[h] for h in range(7, 11)) * LOSS_FACTOR
-                    v_gap = sum(d_map[h] for h in range(15, 21)) * LOSS_FACTOR
-                    
+                    # --- START PASTE 2 HERE ---
+                    total_discharged = sum(d_map.values())
+                    v_to_recharge = total_discharged * LOSS_FACTOR
+
+                    # Use our NEW DYNAMIC windows
+                    c_night = sorted(DYN_NIGHT_WINDOW, key=lambda h: price_row[h])[:2]
+                    c_gap = sorted(DYN_GAP_WINDOW, key=lambda h: price_row[h])[:2] if DYN_GAP_WINDOW else []
+
                     for h in range(24):
-                        charge_val = (v_night/2 if h in c_night else 0) + (v_gap/2 if h in c_gap else 0)
+                        charge_val = 0
+                        if h in c_night:
+                            charge_val = (v_to_recharge * 0.7) / len(c_night)
+                        elif h in c_gap:
+                            charge_val = (v_to_recharge * 0.3) / len(c_gap)
+                        elif not c_gap and h in c_night: 
+                            charge_val = v_to_recharge / len(c_night)
+
                         net_flow = d_map[h] - charge_val
-                        
-                        # Use .at with the specific column name for speed and accuracy
                         df_schedule.at[idx, hr_cols[h]] = round(net_flow, 4)
                         df_sim.at[idx, hr_cols[h]] = max(0, row[hr_cols[h]] - net_flow)
-
+                    # --- END PASTE 2 ---
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
                 m_gen_p = get_gen_peak_mean(df_sim, target_mask_list, biz_mask)
                 m_gen_c = m_gen_p * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
