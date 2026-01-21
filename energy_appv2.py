@@ -301,7 +301,7 @@ if u_input:
             net_charge_base, peak_mw_base = calculate_network_charge_average(df_raw, biz_mask, hr_cols)
             gen_peak_base = get_gen_peak_mean(df_raw, target_mask_list, biz_mask)
             gen_cost_base = gen_peak_base * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
-            energy_cost_base = calculate_total_energy_cost(df_raw, df_prices, hr_cols)
+            energy_cost_base = calculate_total_energy_cost(df_raw, price_map, hr_cols)  
             
             summary_results.append({
                 "Setup": "ФАКТ", 
