@@ -254,7 +254,7 @@ except Exception as e:
     st.stop()
 # Note: We are using u_input for your local data, 
 # but we pull the mask automatically from GitHub based on your sidebar buttons.
-if u_input and u_price:
+if u_input:
     if st.button("🚀 Симулируем"):
         with st.spinner("Рассчитываем сценарии..."):
             # 1. Load Data
@@ -318,7 +318,7 @@ if u_input and u_price:
             })
             excel_data["Baseline"] = df_raw
 
-            # --- 2. MODULES LOOP ---
+           # --- 2. MODULES LOOP ---
             module_names = {5: "5_Modules 73kW", 6: "6_Modules 87,6kW", 7: "7_Modules 102,2kW", 8: "8_Modules 116,8kW"}
             
             for m in MODULE_COUNTS:
@@ -327,7 +327,8 @@ if u_input and u_price:
                 df_schedule = df_raw.copy()
                 df_schedule[hr_cols] = 0.0
                 
-            for idx, row in df_sim.iterrows():
+                # The daily loop must be INSIDE the module count loop
+                for idx, row in df_sim.iterrows():
                     if not biz_mask[idx]: continue
                     
                     day_num = row.iloc[0].day
@@ -335,15 +336,11 @@ if u_input and u_price:
                     day_data = price_map[day_num]
                     
                     # --- STEP 1: DYNAMICALLY SPLIT THE DAY ---
-                    # The gap is the space between the last morning peak and first evening peak
                     morning_hrs = [h for h in ALL_ASSESS if h < min(DYN_GAP_WINDOW + [24])]
                     evening_hrs = [h for h in ALL_ASSESS if h > max(DYN_NIGHT_WINDOW + [-1]) and h not in morning_hrs]
 
                     # --- STEP 2: TWO DISCHARGE CYCLES ---
-                    # Cycle A: Morning (Uses full capacity)
                     d_map_morn = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, morning_hrs)
-                    
-                    # Cycle B: Evening (Uses full capacity again because we refill in the gap)
                     d_map_eve = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, evening_hrs)
                     
                     # Merge discharges
@@ -353,12 +350,7 @@ if u_input and u_price:
                     full_recharge_v = cap * LOSS_FACTOR
                     max_charge_per_hour = cap * 0.5 
 
-                    # A. Night Charge (spread over ALL available night hours to keep peaks low)
-                    # We don't just pick 2; we use the whole window to minimize the kW "bump"
                     charge_night_per_hour = min(max_charge_per_hour, full_recharge_v / len(DYN_NIGHT_WINDOW))
-                    
-                    # B. Gap Charge (spread over ALL available gap hours)
-                    # This uses the WHOLE gap as you requested
                     charge_gap_per_hour = min(max_charge_per_hour, full_recharge_v / len(DYN_GAP_WINDOW))
 
                     # --- STEP 4: APPLY NET FLOW ---
@@ -372,11 +364,14 @@ if u_input and u_price:
                         net_flow = d_map_total[h] - charge_val
                         df_schedule.at[idx, hr_cols[h]] = round(net_flow, 4)
                         df_sim.at[idx, hr_cols[h]] = max(0, row[hr_cols[h]] - net_flow)
-                    # --- END PASTE 2 ---
+
+                # --- STEP 5: CALCULATE TOTALS FOR THIS MODULE CONFIG ---
+                # This block must be inside 'for m in MODULE_COUNTS' but outside the 'iterrows' loop
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
                 m_gen_p = get_gen_peak_mean(df_sim, target_mask_list, biz_mask)
                 m_gen_c = m_gen_p * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
-                m_en_c = calculate_total_energy_cost(df_sim, df_prices, hr_cols)
+                # We use price_map here instead of df_prices
+                m_en_c = calculate_total_energy_cost(df_sim, price_map, hr_cols)
 
                 summary_results.append({
                     "Setup": module_names[m], 
