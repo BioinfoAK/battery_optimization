@@ -271,8 +271,6 @@ if u_input:
             
             if target_mask_list is None:
                 st.stop() 
-
-            df_prices = pd.read_excel(u_price)
             # ... Data loading above ...
             hr_cols = HR_COLS 
             
@@ -366,18 +364,26 @@ if u_input:
                         df_sim.at[idx, hr_cols[h]] = max(0, row[hr_cols[h]] - net_flow)
 
                 # --- STEP 5: CALCULATE TOTALS FOR THIS MODULE CONFIG ---
-                # This block must be inside 'for m in MODULE_COUNTS' but outside the 'iterrows' loop
+
+
+
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
                 m_gen_p = get_gen_peak_mean(df_sim, target_mask_list, biz_mask)
                 m_gen_c = m_gen_p * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
-                # We use price_map here instead of df_prices
                 m_en_c = calculate_total_energy_cost(df_sim, price_map, hr_cols)
+
+                # Calculate average daily charge volume for info
+                # charge_night_per_hour and charge_gap_per_hour are already defined above
+                daily_night_kwh = charge_night_per_hour * len(DYN_NIGHT_WINDOW)
+                daily_gap_kwh = charge_gap_per_hour * len(DYN_GAP_WINDOW)
 
                 summary_results.append({
                     "Setup": module_names[m], 
                     "Total Monthly kWh": round(df_sim[hr_cols].sum().sum(), 2),
                     "Generating Peak (kW)": round(m_gen_p, 4), 
                     "Avg Assessment Peak (MW)": m_peak_mw*1000,
+                    "Night Charge (Daily Avg kWh)": round(daily_night_kwh, 1),
+                    "Gap Charge (Daily Avg kWh)": round(daily_gap_kwh, 1),
                     "Generating cost": round(m_gen_c, 2), 
                     "Max network charge": m_net,
                     "Total Consumption Cost": m_en_c, 
@@ -433,3 +439,14 @@ if u_input:
             )
 else:
     st.info("Для начала расчета, выберите файлы.")
+
+# --- 2.5 VALIDATION DISPLAY ---
+            st.subheader("📊 Анализ циклов заряда")
+            cols = st.columns(len(MODULE_COUNTS))
+            for i, m in enumerate(MODULE_COUNTS):
+                res = summary_results[i+1] # +1 to skip Baseline
+                with cols[i]:
+                    st.metric(f"Конфиг {m}", f"{res['Night Charge (Daily Avg kWh)']} кВтч")
+                    st.caption("Заряд Ночь + Заряд Перерыв")
+                    if res['Night Charge (Daily Avg kWh)'] > (cap * 0.5 * len(DYN_NIGHT_WINDOW)):
+                        st.warning("⚠️ Ограничение мощности заряда достигнуто")
