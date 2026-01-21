@@ -276,28 +276,25 @@ if u_input:
             ALL_ASSESS = get_assessment_hours(ASSESS_FILE_PATH, month_choice)
             st.caption(f"📊 Часы оценки (Peak Shaving) для {month_choice}: {ALL_ASSESS}")
 
-            # Define recharge windows before baseline for consistency
+            # Define windows
             first_peak = min(ALL_ASSESS) if ALL_ASSESS else 7
             DYN_NIGHT_WINDOW = [h for h in range(0, first_peak)]
+            
             morning_peaks = [h for h in ALL_ASSESS if h < 13]
             evening_peaks = [h for h in ALL_ASSESS if h >= 13]
-
             if morning_peaks and evening_peaks:
                 DYN_GAP_WINDOW = [h for h in range(max(morning_peaks) + 1, min(evening_peaks)) if h not in ALL_ASSESS]
             else:
                 DYN_GAP_WINDOW = [h for h in range(12, 15) if h not in ALL_ASSESS]
 
+            summary_results = []
+            excel_data = {}
             # --- 2. BASELINE (ФАКТ) ---
             # IMPORTANT: We calculate this after target_mask_list is confirmed
             net_charge_base, peak_mw_base = calculate_network_charge_average(df_raw, biz_mask, hr_cols)
-            
-            # This is the function likely returning 0. 
-            # It looks for "True" values in target_mask_list.
             gen_peak_base = get_gen_peak_mean(df_raw, target_mask_list, biz_mask)
-            
             gen_cost_base = gen_peak_base * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
-            energy_cost_base = calculate_total_energy_cost(df_raw, price_map, hr_cols)
-            
+                        
             summary_results.append({
                 "Setup": "ФАКТ", 
                 "Total Monthly kWh": round(df_raw[hr_cols].sum().sum(), 2),
@@ -313,73 +310,84 @@ if u_input:
             })
             excel_data["Baseline"] = df_raw
            # --- 2. MODULES LOOP ---
+# --- 2. MODULES LOOP ---
             module_names = {5: "5_Modules 73kW", 6: "6_Modules 87,6kW", 7: "7_Modules 102,2kW", 8: "8_Modules 116,8kW"}
             
             for m in MODULE_COUNTS:
                 cap = m * MODULE_KWH
+                max_charge_pwr = cap * 0.5  # Defined here so it's available in the loop
                 df_sim = df_raw.copy()
                 df_schedule = df_raw.copy()
                 df_schedule[hr_cols] = 0.0
                 
-                # The daily loop must be INSIDE the module count loop
+                # INITIALIZE counters for each module configuration
+                total_night_charge_vol = 0
+                total_gap_charge_vol = 0
+                days_count = 0
+
+                # CORRECTED INDENTATION: This loop must be inside the module loop
                 for idx, row in df_sim.iterrows():
-                    if not biz_mask[idx]: continue
+                    if not biz_mask[idx]: 
+                        continue
                     
-                    day_num = row.iloc[0].day
-                    if day_num not in price_map: continue
-                    day_data = price_map[day_num]
+                    days_count += 1
+                    day_dt = pd.to_datetime(row.iloc[0])
+                    day_num = day_dt.day
                     
-                    # --- STEP 1: DYNAMICALLY SPLIT THE DAY ---
-                    morning_hrs = [h for h in ALL_ASSESS if h < min(DYN_GAP_WINDOW + [24])]
-                    evening_hrs = [h for h in ALL_ASSESS if h > max(DYN_NIGHT_WINDOW + [-1]) and h not in morning_hrs]
-
-                    # --- STEP 2: TWO DISCHARGE CYCLES ---
-                    d_map_morn = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, morning_hrs)
-                    d_map_eve = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, evening_hrs)
+                    if day_num not in price_map: 
+                        continue
+                        
+                    day_prices = price_map[day_num]
                     
-                    # Merge discharges
-                    d_map_total = {h: d_map_morn[h] + d_map_eve[h] for h in range(24)}
+                    # 1. DISCHARGE (Peak Shaving)
+                    morning_hrs = [h for h in ALL_ASSESS if h < (min(DYN_GAP_WINDOW) if DYN_GAP_WINDOW else 24)]
+                    evening_hrs = [h for h in ALL_ASSESS if h not in morning_hrs]
+                    
+                    d_morn = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, morning_hrs)
+                    d_eve = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, evening_hrs)
+                    d_total = {h: d_morn[h] + d_eve[h] for h in range(24)}
 
-                    # --- STEP 3: TWO FULL RECHARGE CYCLES ---
-                    full_recharge_v = cap * LOSS_FACTOR
-                    max_charge_per_hour = cap * 0.5 
+                    # 2. CHARGE: PICK 2 CHEAPEST HOURS
+                    net_flow = {h: d_total[h] for h in range(24)}
+                    
+                    # Night: Cheapest 2 in DYN_NIGHT_WINDOW
+                    night_price_subset = {h: day_prices[HR_COLS[h]] for h in DYN_NIGHT_WINDOW}
+                    cheapest_night = sorted(night_price_subset, key=night_price_subset.get)[:2]
+                    needed_night = cap * LOSS_FACTOR
+                    for h in cheapest_night:
+                        charge = min(needed_night, max_charge_pwr)
+                        net_flow[h] -= charge
+                        needed_night -= charge
+                        total_night_charge_vol += charge
 
-                    charge_night_per_hour = min(max_charge_per_hour, full_recharge_v / len(DYN_NIGHT_WINDOW))
-                    charge_gap_per_hour = min(max_charge_per_hour, full_recharge_v / len(DYN_GAP_WINDOW))
+                    # Gap: Cheapest 2 in DYN_GAP_WINDOW
+                    gap_price_subset = {h: day_prices[HR_COLS[h]] for h in DYN_GAP_WINDOW}
+                    cheapest_gap = sorted(gap_price_subset, key=gap_price_subset.get)[:2]
+                    needed_gap = cap * LOSS_FACTOR
+                    for h in cheapest_gap:
+                        charge = min(needed_gap, max_charge_pwr)
+                        net_flow[h] -= charge
+                        needed_gap -= charge
+                        total_gap_charge_vol += charge
 
-                    # --- STEP 4: APPLY NET FLOW ---
+                    # 3. APPLY TO DATAFRAME
                     for h in range(24):
-                        charge_val = 0
-                        if h in DYN_NIGHT_WINDOW:
-                            charge_val = charge_night_per_hour
-                        elif h in DYN_GAP_WINDOW:
-                            charge_val = charge_gap_per_hour
+                        df_schedule.at[idx, hr_cols[h]] = round(net_flow[h], 4)
+                        df_sim.at[idx, hr_cols[h]] = max(0, row[hr_cols[h]] - net_flow[h])
 
-                        net_flow = d_map_total[h] - charge_val
-                        df_schedule.at[idx, hr_cols[h]] = round(net_flow, 4)
-                        df_sim.at[idx, hr_cols[h]] = max(0, row[hr_cols[h]] - net_flow)
-
-                # --- STEP 5: CALCULATE TOTALS FOR THIS MODULE CONFIG ---
-
-
-
+                # 4. FINAL CALCS FOR MODULE
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
                 m_gen_p = get_gen_peak_mean(df_sim, target_mask_list, biz_mask)
                 m_gen_c = m_gen_p * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
                 m_en_c = calculate_total_energy_cost(df_sim, price_map, hr_cols)
-
-                # Calculate average daily charge volume for info
-                # charge_night_per_hour and charge_gap_per_hour are already defined above
-                daily_night_kwh = charge_night_per_hour * len(DYN_NIGHT_WINDOW)
-                daily_gap_kwh = charge_gap_per_hour * len(DYN_GAP_WINDOW)
 
                 summary_results.append({
                     "Setup": module_names[m], 
                     "Total Monthly kWh": round(df_sim[hr_cols].sum().sum(), 2),
                     "Generating Peak (kW)": round(m_gen_p, 4), 
                     "Avg Assessment Peak (MW)": m_peak_mw*1000,
-                    "Night Charge (Daily Avg kWh)": round(daily_night_kwh, 1),
-                    "Gap Charge (Daily Avg kWh)": round(daily_gap_kwh, 1),
+                    "Night Charge (Daily Avg kWh)": round(total_night_charge_vol/max(1, days_count), 1),
+                    "Gap Charge (Daily Avg kWh)": round(total_gap_charge_vol/max(1, days_count), 1),
                     "Generating cost": round(m_gen_c, 2), 
                     "Max network charge": m_net,
                     "Total Consumption Cost": m_en_c, 
