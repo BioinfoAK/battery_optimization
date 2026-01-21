@@ -40,7 +40,8 @@ REGION_PATH = region_choice.lower()
 MONTH_FILE = f"generating_hours_{month_choice.lower()}.xlsx"
 REF_HOURS_PATH = f"reference_data/{REGION_PATH}/hours/{MONTH_FILE}"
 ASSESS_FILE_PATH = f"reference_data/{REGION_PATH}/hours/assessment_hours.xlsx"
-
+PRICE_FILE_NAME = f"hourly_tariffs_{month_choice.lower()}.xlsx"
+REF_PRICE_PATH = f"reference_data/{REGION_PATH}/tariffs/{PRICE_FILE_NAME}"
 # --- 2. HEADER DEFINITIONS ---
 # Matching your new '0.00-1.00' format
 HR_COLS = [f"{h}.00-{h+1}.00" for h in range(24)]
@@ -155,40 +156,40 @@ def get_gen_peak_mean(df, mask_list, current_biz_mask):
                 daily_peaks.append(max(green_loads))
     return np.mean(daily_peaks) if daily_peaks else 0
 
-def optimize_discharge(row_data, target_map, capacity):
-    # row_data is the 24-hour consumption array
+def optimize_discharge(row_data, target_map, capacity, active_window):
     discharge = {hr: 0 for hr in range(24)}
     rem = capacity
+    max_out = capacity * 0.5
     
-    # --- PHASE 1: Mandatory Target (Generating) Hour ---
-    # We must hit the green hour from the mask first
+    # 1. Mandatory Target Hour (ONLY if it falls within the current window)
     for hr in range(24):
-        if target_map.get(hr, False):
+        if hr in active_window and target_map.get(hr, False):
             val = row_data[hr]
-            actual = min(val, rem)
+            actual = min(val, rem, max_out)
             discharge[hr] = actual
             rem -= actual
             
-    # --- PHASE 2: Dynamic Peak Shaving ---
-    # If energy remains, we attack the highest peaks in ALL_ASSESS
-    if rem > 0.1 and ALL_ASSESS:
-        # We loop until energy is gone or no more load to shave
+    # 2. Aggressive Shaving (ONLY for hours in the active window)
+    if rem > 0.1 and active_window:
         while rem > 0.01:
-            # Find the hour in ALL_ASSESS that has the highest CURRENT load
-            # Current load = Original Load - What we already discharged
-            current_loads = {h: (row_data[h] - discharge[h]) for h in ALL_ASSESS}
+            current_loads = {h: (row_data[h] - discharge[h]) for h in active_window}
+            if not current_loads or max(current_loads.values()) <= 0:
+                break
+            
             peak_hr = max(current_loads, key=current_loads.get)
+            can_add = max_out - discharge[peak_hr]
             
-            if current_loads[peak_hr] <= 0:
-                break # No more load to shave in assessment hours
-            
-            # Shave in small increments (0.5kW) to flatten the peak evenly
-            shave_amount = min(0.5, rem, current_loads[peak_hr])
+            if can_add <= 0:
+                # This hour is at physical limit, temporarily ignore it
+                active_window = [h for h in active_window if h != peak_hr]
+                continue
+
+            shave_amount = min(0.1, rem, current_loads[peak_hr], can_add)
             discharge[peak_hr] += shave_amount
             rem -= shave_amount
             
     return discharge
-
+    
 def calculate_success_rate(df_scenario, mask):
     total_green_hours = 0
     zeros_achieved = 0
@@ -229,22 +230,28 @@ def calculate_network_charge_average(df_scenario, current_biz_mask, hr_cols):
     
     return total_network_charge, round(avg_peak_mw, 4)
     
-def calculate_total_energy_cost(df_scenario, df_prices, hour_columns):
+def calculate_total_energy_cost(df_scenario, price_map, hour_columns):
     total_rubles = 0
     for idx, row in df_scenario.iterrows():
         day_num = row.iloc[0].day
-        try:
-            price_row = df_prices[df_prices.iloc[:, 0] == day_num].iloc[0, 1:].values
-            # Explicitly select the 24 hour columns by name
-            consumption_values = row[hour_columns].values
-            total_rubles += np.sum((consumption_values / 1000) * price_row)
-        except: continue
+        if day_num in price_map:
+            day_data = price_map[day_num]
+            # Sum up (kWh * (Price_per_MWh / 1000)) for all 24 hours
+            day_cost = sum(row[hr] * (day_data[hr] / 1000) for hr in hour_columns)
+            total_rubles += day_cost
     return round(total_rubles, 2)
     
 # --- 4. STREAMLIT UPLOAD LOGIC ---
 u_input = st.file_uploader("Выбрать файл с данными потребления объекта (xlsx)", type=["xlsx"])
-u_price = st.file_uploader("Выбрать файл с почасовыми тарифами (xlsx)", type=["xlsx"])
-
+try:
+    df_prices = pd.read_excel(REF_PRICE_PATH)
+    # Ensure the first column (Days) is integer type
+    df_prices.iloc[:, 0] = df_prices.iloc[:, 0].astype(int)
+    # Map the day column to headers for easy lookup later
+    price_map = df_prices.set_index(df_prices.columns[0]).to_dict(orient='index')
+except Exception as e:
+    st.error(f"❌ Ошибка загрузки тарифов: {e}")
+    st.stop()
 # Note: We are using u_input for your local data, 
 # but we pull the mask automatically from GitHub based on your sidebar buttons.
 if u_input and u_price:
@@ -320,30 +327,49 @@ if u_input and u_price:
                 df_schedule = df_raw.copy()
                 df_schedule[hr_cols] = 0.0
                 
-                for idx, row in df_sim.iterrows():
+            for idx, row in df_sim.iterrows():
                     if not biz_mask[idx]: continue
                     
-                    price_row = df_prices[df_prices.iloc[:,0] == row.iloc[0].day].iloc[0, 1:].values
-                    d_map = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap)
+                    day_num = row.iloc[0].day
+                    if day_num not in price_map: continue
+                    day_data = price_map[day_num]
                     
-                    # --- START PASTE 2 HERE ---
-                    total_discharged = sum(d_map.values())
-                    v_to_recharge = total_discharged * LOSS_FACTOR
+                    # --- STEP 1: DYNAMICALLY SPLIT THE DAY ---
+                    # The gap is the space between the last morning peak and first evening peak
+                    morning_hrs = [h for h in ALL_ASSESS if h < min(DYN_GAP_WINDOW + [24])]
+                    evening_hrs = [h for h in ALL_ASSESS if h > max(DYN_NIGHT_WINDOW + [-1]) and h not in morning_hrs]
 
-                    # Use our NEW DYNAMIC windows
-                    c_night = sorted(DYN_NIGHT_WINDOW, key=lambda h: price_row[h])[:2]
-                    c_gap = sorted(DYN_GAP_WINDOW, key=lambda h: price_row[h])[:2] if DYN_GAP_WINDOW else []
+                    # --- STEP 2: TWO DISCHARGE CYCLES ---
+                    # Cycle A: Morning (Uses full capacity)
+                    d_map_morn = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, morning_hrs)
+                    
+                    # Cycle B: Evening (Uses full capacity again because we refill in the gap)
+                    d_map_eve = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, evening_hrs)
+                    
+                    # Merge discharges
+                    d_map_total = {h: d_map_morn[h] + d_map_eve[h] for h in range(24)}
 
+                    # --- STEP 3: TWO FULL RECHARGE CYCLES ---
+                    full_recharge_v = cap * LOSS_FACTOR
+                    max_charge_per_hour = cap * 0.5 
+
+                    # A. Night Charge (spread over ALL available night hours to keep peaks low)
+                    # We don't just pick 2; we use the whole window to minimize the kW "bump"
+                    charge_night_per_hour = min(max_charge_per_hour, full_recharge_v / len(DYN_NIGHT_WINDOW))
+                    
+                    # B. Gap Charge (spread over ALL available gap hours)
+                    # This uses the WHOLE gap as you requested
+                    charge_gap_per_hour = min(max_charge_per_hour, full_recharge_v / len(DYN_GAP_WINDOW))
+
+                    # --- STEP 4: APPLY NET FLOW ---
                     for h in range(24):
                         charge_val = 0
-                        if h in c_night:
-                            charge_val = (v_to_recharge * 0.7) / len(c_night)
-                        elif h in c_gap:
-                            charge_val = (v_to_recharge * 0.3) / len(c_gap)
-                        elif not c_gap and h in c_night: 
-                            charge_val = v_to_recharge / len(c_night)
+                        if h in DYN_NIGHT_WINDOW:
+                            charge_val = charge_night_per_hour
+                        elif h in DYN_GAP_WINDOW:
+                            charge_val = charge_gap_per_hour
 
-                        net_flow = d_map[h] - charge_val
+                        net_flow = d_map_total[h] - charge_val
                         df_schedule.at[idx, hr_cols[h]] = round(net_flow, 4)
                         df_sim.at[idx, hr_cols[h]] = max(0, row[hr_cols[h]] - net_flow)
                     # --- END PASTE 2 ---
