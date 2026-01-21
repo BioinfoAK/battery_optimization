@@ -5,8 +5,6 @@ import openpyxl
 import holidays
 from io import BytesIO
 
-import streamlit as st
-
 def check_password():
     """Returns True if the user had the correct password."""
     if "password_correct" not in st.session_state:
@@ -84,7 +82,9 @@ REF_HOURS_PATH = f"reference_data/{REGION_PATH}/hours/{MONTH_FILE}"
 ASSESS_FILE_PATH = f"reference_data/{REGION_PATH}/hours/assessment_hours.xlsx"
 PRICE_FILE_NAME = f"hourly_tariffs_{month_choice.lower()}.xlsx"
 REF_PRICE_PATH = f"reference_data/{REGION_PATH}/tariffs/{PRICE_FILE_NAME}"
-
+MODULE_COUNTS = [5, 6, 7, 8] 
+MODULE_KWH = 14.6
+LOSS_FACTOR = 1.10
 # Column headers format
 HR_COLS = [f"{h}.00-{h+1}.00" for h in range(24)]
 
