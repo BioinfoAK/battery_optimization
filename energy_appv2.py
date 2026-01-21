@@ -315,7 +315,7 @@ if u_input:
 # --- 2. MODULES LOOP ---
             module_names = {5: "5_Modules 73kW", 6: "6_Modules 87,6kW", 7: "7_Modules 102,2kW", 8: "8_Modules 116,8kW"}
             
-           for m in MODULE_COUNTS:
+            for m in MODULE_COUNTS:
                 cap = m * MODULE_KWH
                 max_charge_pwr = cap * 0.5 
                 df_sim = df_raw.copy()
