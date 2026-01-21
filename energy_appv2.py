@@ -271,18 +271,14 @@ if u_input:
             
             if target_mask_list is None:
                 st.stop() 
-            # ... Data loading above ...
+            # --- 1. PRE-CALCULATION SETUP ---
             hr_cols = HR_COLS 
-            
-            # --- START PASTE 1 HERE ---
-            # 1. Dynamically load Assessment Hours
             ALL_ASSESS = get_assessment_hours(ASSESS_FILE_PATH, month_choice)
             st.caption(f"📊 Часы оценки (Peak Shaving) для {month_choice}: {ALL_ASSESS}")
 
-            # 2. DYNAMICALLY DEFINE RECHARGE WINDOWS
+            # Define recharge windows before baseline for consistency
             first_peak = min(ALL_ASSESS) if ALL_ASSESS else 7
             DYN_NIGHT_WINDOW = [h for h in range(0, first_peak)]
-
             morning_peaks = [h for h in ALL_ASSESS if h < 13]
             evening_peaks = [h for h in ALL_ASSESS if h >= 13]
 
@@ -291,23 +287,24 @@ if u_input:
             else:
                 DYN_GAP_WINDOW = [h for h in range(12, 15) if h not in ALL_ASSESS]
 
-            st.caption(f"🔌 Окна зарядки: Ночь {DYN_NIGHT_WINDOW}, Перерыв {DYN_GAP_WINDOW}")
-            # --- END PASTE 1 ---
-
-            summary_results = []
-            excel_data = {} 
-
-            # --- 1. BASELINE ---
+            # --- 2. BASELINE (ФАКТ) ---
+            # IMPORTANT: We calculate this after target_mask_list is confirmed
             net_charge_base, peak_mw_base = calculate_network_charge_average(df_raw, biz_mask, hr_cols)
+            
+            # This is the function likely returning 0. 
+            # It looks for "True" values in target_mask_list.
             gen_peak_base = get_gen_peak_mean(df_raw, target_mask_list, biz_mask)
+            
             gen_cost_base = gen_peak_base * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
-            energy_cost_base = calculate_total_energy_cost(df_raw, price_map, hr_cols)  
+            energy_cost_base = calculate_total_energy_cost(df_raw, price_map, hr_cols)
             
             summary_results.append({
                 "Setup": "ФАКТ", 
                 "Total Monthly kWh": round(df_raw[hr_cols].sum().sum(), 2),
                 "Generating Peak (kW)": round(gen_peak_base, 4), 
                 "Avg Assessment Peak (MW)": peak_mw_base*1000,
+                "Night Charge (Daily Avg kWh)": 0,
+                "Gap Charge (Daily Avg kWh)": 0,
                 "Generating cost": round(gen_cost_base, 2), 
                 "Max network charge": net_charge_base,
                 "Total Consumption Cost": energy_cost_base, 
@@ -315,7 +312,6 @@ if u_input:
                 "Success Rate (%)": calculate_success_rate(df_raw, target_mask_list)
             })
             excel_data["Baseline"] = df_raw
-
            # --- 2. MODULES LOOP ---
             module_names = {5: "5_Modules 73kW", 6: "6_Modules 87,6kW", 7: "7_Modules 102,2kW", 8: "8_Modules 116,8kW"}
             
