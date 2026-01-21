@@ -430,16 +430,7 @@ if u_input:
             base_filename = u_input.name.split('.')[0]
             dynamic_name = f"{base_filename}_{region_choice}_{month_choice}.xlsx"
 
-            st.success("✅ Готово!")
-            st.download_button(
-                label="📥 Скачать результаты Excel",
-                data=output.getvalue(),
-                file_name=dynamic_name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-else:
-    st.info("Для начала расчета, выберите файлы.")
-
+            
 # --- 2.5 VALIDATION DISPLAY ---
             st.subheader("📊 Анализ циклов заряда")
             cols = st.columns(len(MODULE_COUNTS))
@@ -450,3 +441,13 @@ else:
                     st.caption("Заряд Ночь + Заряд Перерыв")
                     if res['Night Charge (Daily Avg kWh)'] > (cap * 0.5 * len(DYN_NIGHT_WINDOW)):
                         st.warning("⚠️ Ограничение мощности заряда достигнуто")
+            st.success("✅ Готово!")
+            st.download_button(
+                label="📥 Скачать результаты Excel",
+                data=output.getvalue(),
+                file_name=dynamic_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+else:
+    st.info("Для начала расчета, выберите файлы.")
+
