@@ -290,11 +290,14 @@ if u_input:
             summary_results = []
             excel_data = {}
             # --- 2. BASELINE (ФАКТ) ---
-            # IMPORTANT: We calculate this after target_mask_list is confirmed
+
             net_charge_base, peak_mw_base = calculate_network_charge_average(df_raw, biz_mask, hr_cols)
             gen_peak_base = get_gen_peak_mean(df_raw, target_mask_list, biz_mask)
             gen_cost_base = gen_peak_base * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
-                        
+            
+            # FIX: Calculate the cost FIRST, then assign it to the dictionary
+            energy_cost_base = calculate_total_energy_cost(df_raw, price_map, hr_cols)
+            
             summary_results.append({
                 "Setup": "ФАКТ", 
                 "Total Monthly kWh": round(df_raw[hr_cols].sum().sum(), 2),
@@ -309,21 +312,20 @@ if u_input:
                 "Success Rate (%)": calculate_success_rate(df_raw, target_mask_list)
             })
             excel_data["Baseline"] = df_raw
-           # --- 2. MODULES LOOP ---
 # --- 2. MODULES LOOP ---
             module_names = {5: "5_Modules 73kW", 6: "6_Modules 87,6kW", 7: "7_Modules 102,2kW", 8: "8_Modules 116,8kW"}
             
-            for m in MODULE_COUNTS:
+           for m in MODULE_COUNTS:
                 cap = m * MODULE_KWH
-                max_charge_pwr = cap * 0.5  # Defined here so it's available in the loop
+                max_charge_pwr = cap * 0.5 
                 df_sim = df_raw.copy()
                 df_schedule = df_raw.copy()
                 df_schedule[hr_cols] = 0.0
                 
-                # INITIALIZE counters for each module configuration
+                # ADD THESE INITIALIZERS HERE:
                 total_night_charge_vol = 0
                 total_gap_charge_vol = 0
-                days_count = 0
+                days_count = 0 
 
                 # CORRECTED INDENTATION: This loop must be inside the module loop
                 for idx, row in df_sim.iterrows():
@@ -397,28 +399,33 @@ if u_input:
                 excel_data[f"{m}_Modules_Load"] = df_sim
                 excel_data[f"{m}_Schedule"] = df_schedule
 
-            # --- 3. EXECUTIVE REPORT (Copied Exactly) ---
+# --- 3. EXECUTIVE REPORT ---
             def get_weighted_avg_price(res_entry):
                 if res_entry['Total Monthly kWh'] == 0: return 0
+                # res_entry['Total Consumption Cost'] is RUB
+                # res_entry['Total Monthly kWh'] * KW_TO_MWH is MWh
+                # Result is RUB / MWh
                 return res_entry['Total Consumption Cost'] / (res_entry['Total Monthly kWh'] * KW_TO_MWH)
 
             v_report = [
                 {"": "Потребление", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 {"": "Объем потребления, кВт×ч", **{res['Setup']: res['Total Monthly kWh'] for res in summary_results}},
                 {"": "Генераторная (покупная) мощность, кВт", **{res['Setup']: res['Generating Peak (kW)'] for res in summary_results}},
-                {"": "Сетевая мощность, кВт", **{res['Setup']: round(res['Avg Assessment Peak (MW)'], 2) for res in summary_results}},
+                {"": "Сетевая мощность, кВт", **{res['Setup']: round(res['Avg Assessment Peak (MW)'] * 1000, 2) for res in summary_results}},
                 {"": "", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 {"": "Тарифы", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
-                {"": "Средняя стоимость электроэнергии, руб/MВтч", **{res['Setup']: round(get_weighted_avg_price(res)/1000, 2) for res in summary_results}},
-                {"": "Генераторная (покупная) мощность", **{res['Setup']: round(TOTAL_RATE_RUB_M_WH/1000, 2) for res in summary_results}},
-                {"": "Ставка за содержание сетей", **{res['Setup']: round(NETWORK_CAPACITY_RATE/1000, 2) for res in summary_results}},
+                # FIXED: Removed extra /1000 since function already returns RUB/MWh
+                {"": "Средняя стоимость электроэнергии, руб/MВтч", **{res['Setup']: round(get_weighted_avg_price(res), 2) for res in summary_results}},
+                # FIXED: Removed /1000 to keep it as RUB/MWh (standard reporting)
+                {"": "Генераторная (покупная) мощность, руб/МВт", **{res['Setup']: round(TOTAL_RATE_RUB_M_WH, 2) for res in summary_results}},
+                {"": "Ставка за содержание сетей, руб/МВт", **{res['Setup']: round(NETWORK_CAPACITY_RATE, 2) for res in summary_results}},
                 {"": "", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 {"": "ИТОГО:", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
-                {"": "Стоимость электроэнергии", **{res['Setup']: res['Total Consumption Cost'] for res in summary_results}},
-                {"": "Стоимость генераторной", **{res['Setup']: res['Generating cost'] for res in summary_results}},
-                {"": "Стоимость сетевой", **{res['Setup']: res['Max network charge'] for res in summary_results}},
-                {"": "Стоимость без НДС 20%", **{res['Setup']: res['GRAND TOTAL COST'] for res in summary_results}},
-                {"": "Стоимость с НДС 20%", **{res['Setup']: round(res['GRAND TOTAL COST'] * 1.20, 2) for res in summary_results}}
+                {"": "Стоимость электроэнергии, руб", **{res['Setup']: res['Total Consumption Cost'] for res in summary_results}},
+                {"": "Стоимость генераторной, руб", **{res['Setup']: res['Generating cost'] for res in summary_results}},
+                {"": "Стоимость сетевой, руб", **{res['Setup']: res['Max network charge'] for res in summary_results}},
+                {"": "Стоимость без НДС 20%, руб", **{res['Setup']: res['GRAND TOTAL COST'] for res in summary_results}},
+                {"": "Стоимость с НДС 20%, руб", **{res['Setup']: round(res['GRAND TOTAL COST'] * 1.20, 2) for res in summary_results}}
             ]
 
             # --- 4. EXCEL EXPORT ---
