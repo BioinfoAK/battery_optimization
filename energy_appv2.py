@@ -415,7 +415,7 @@ if u_input:
                 {"": "", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 {"": "Тарифы", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 # FIXED: Removed extra /1000 since function already returns RUB/MWh
-                {"": "Средняя стоимость электроэнергии, руб/MВтч", **{res['Setup']: round(get_weighted_avg_price(res), 2) for res in summary_results}},
+                {"": "Средняя стоимость электроэнергии, руб/MВтч", **{res['Setup']: round(get_weighted_avg_price(res)/1000, 2) for res in summary_results}},
                 # FIXED: Removed /1000 to keep it as RUB/MWh (standard reporting)
                 {"": "Генераторная (покупная) мощность, руб/МВт", **{res['Setup']: round(TOTAL_RATE_RUB_M_WH, 2) for res in summary_results}},
                 {"": "Ставка за содержание сетей, руб/МВт", **{res['Setup']: round(NETWORK_CAPACITY_RATE, 2) for res in summary_results}},
