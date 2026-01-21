@@ -32,46 +32,61 @@ st.set_page_config(page_title="Расчет оптимального потре�
 st.title("🔋 Расчет оптимального потребления с помощью батареи")
 
 # --- SIDEBAR INPUTS ---
+# --- SIDEBAR INPUTS ---
 st.sidebar.header("Параметры объекта")
-# User selects Region and Month
 region_choice = st.sidebar.radio("Выберите регион:", ["Samara", "Ulyanovsk"])
 month_choice = st.sidebar.selectbox("Выберите месяц:", ["nov25", "dec25"])
+
+# 1. Path logic setup
 REGION_PATH = region_choice.lower()
+REGIONAL_CONFIG_PATH = f"reference_data/{REGION_PATH}/tariffs/regional_config.xlsx"
+
+# 2. LOAD REGIONAL TARIFFS (Dynamic Loading)
+try:
+    df_reg_config = pd.read_excel(REGIONAL_CONFIG_PATH)
+    match = df_reg_config[df_reg_config['month'].astype(str).str.lower() == month_choice.lower()]
+    
+    if not match.empty:
+        default_gen = float(match.iloc[0]['Генераторная (покупная) мощность'])
+        default_admin = float(match.iloc[0]['Ставка за управление'])
+        default_net = float(match.iloc[0]['Ставка за содержание сетей'])
+    else:
+        st.sidebar.warning(f"⚠️ Месяц {month_choice} не найден в {REGIONAL_CONFIG_PATH}")
+        default_gen, default_admin, default_net = 0.0, 0.0, 0.0
+except Exception as e:
+    st.sidebar.error(f"❌ Не удалось загрузить конфиг региона: {e}")
+    default_gen, default_admin, default_net = 0.0, 0.0, 0.0
+
+# 3. INTERACTIVE INPUTS (Using values from Excel as defaults)
+st.sidebar.header("Параметры тарифов (Автозагрузка)")
+
+gen_power_input = st.sidebar.number_input(
+    "Генераторная (покупная) мощность, руб/Мвт", 
+    value=default_gen, format="%.2f"
+)
+gen_change_input = st.sidebar.number_input(
+    "Ставка за управление, руб/Мвт", 
+    value=default_admin, format="%.2f"
+)
+network_rate_input = st.sidebar.number_input(
+    "Ставка за содержание сетей, руб/Мвт", 
+    value=default_net, format="%.2f"
+)
+
+# 4. FINAL CONSTANTS
+TOTAL_RATE_RUB_M_WH = gen_power_input + gen_change_input
+NETWORK_CAPACITY_RATE = network_rate_input
+KW_TO_MWH = 1 / 1000
+
+# Path logic for hours and prices
 MONTH_FILE = f"generating_hours_{month_choice.lower()}.xlsx"
 REF_HOURS_PATH = f"reference_data/{REGION_PATH}/hours/{MONTH_FILE}"
 ASSESS_FILE_PATH = f"reference_data/{REGION_PATH}/hours/assessment_hours.xlsx"
 PRICE_FILE_NAME = f"hourly_tariffs_{month_choice.lower()}.xlsx"
 REF_PRICE_PATH = f"reference_data/{REGION_PATH}/tariffs/{PRICE_FILE_NAME}"
-# --- 2. HEADER DEFINITIONS ---
-# Matching your new '0.00-1.00' format
+
+# Column headers format
 HR_COLS = [f"{h}.00-{h+1}.00" for h in range(24)]
-# We set your current hardcoded values as the 'value' (the default)
-gen_power_input = st.sidebar.number_input(
-    "Генераторная (покупная) мощность, руб/Мвт", 
-    value=1132614.35, 
-    format="%.2f"
-)
-
-gen_change_input = st.sidebar.number_input(
-    "Ставка за управление, руб/Мвт", 
-    value=1317.3, 
-    format="%.2f"
-)
-
-network_rate_input = st.sidebar.number_input(
-    "Ставка за содержание сетей,руб/Мвт", 
-    value=2487916.6, 
-    format="%.2f"
-)
-
-# Now, we use these inputs to calculate our constants
-TOTAL_RATE_RUB_M_WH = gen_power_input + gen_change_input
-NETWORK_CAPACITY_RATE = network_rate_input
-KW_TO_MWH = 1 / 1000
-
-MODULE_COUNTS = [5, 6, 7, 8]
-MODULE_KWH = 14.6
-LOSS_FACTOR = 1.10
 
 COLUMN_NAMES_RU = {
     "Setup": "Конфигурация",
