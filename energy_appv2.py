@@ -183,20 +183,25 @@ def get_gen_peak_mean(df, mask_list, current_biz_mask):
 def optimize_discharge(row_data, target_map, capacity, active_window):
     discharge = {hr: 0 for hr in range(24)}
     rem = capacity
-    max_out = capacity 
+    max_out = capacity  # Full discharge power enabled
     
-    # 1. Mandatory Target Hour (ONLY if it falls within the current window)
+    # 1. Mandatory Target Hour (PRIORITY #1)
+    # REMOVED: 'if hr in active_window'
+    # This ensures if Excel says discharge at 10:00, we do it, 
+    # even if 10:00 isn't a Network Peak hour.
     for hr in range(24):
-        if hr in active_window and target_map.get(hr, False):
+        if target_map.get(hr, False):
             val = row_data[hr]
             actual = min(val, rem, max_out)
             discharge[hr] = actual
             rem -= actual
             
-    # 2. Aggressive Shaving (ONLY for hours in the active window)
+    # 2. Aggressive Shaving (PRIORITY #2 - ONLY for Assessment Hours)
     if rem > 0.1 and active_window:
+        # Create a local copy to avoid modifying the list outside the function
+        shave_window = list(active_window)
         while rem > 0.01:
-            current_loads = {h: (row_data[h] - discharge[h]) for h in active_window}
+            current_loads = {h: (row_data[h] - discharge[h]) for h in shave_window}
             if not current_loads or max(current_loads.values()) <= 0:
                 break
             
@@ -204,8 +209,7 @@ def optimize_discharge(row_data, target_map, capacity, active_window):
             can_add = max_out - discharge[peak_hr]
             
             if can_add <= 0:
-                # This hour is at physical limit, temporarily ignore it
-                active_window = [h for h in active_window if h != peak_hr]
+                shave_window.remove(peak_hr)
                 continue
 
             shave_amount = min(0.1, rem, current_loads[peak_hr], can_add)
