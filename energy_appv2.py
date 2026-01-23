@@ -174,7 +174,7 @@ def get_gen_peak_mean(df, mask_list, current_biz_mask):
 def optimize_discharge(row_data, target_map, capacity, active_window):
     discharge = {hr: 0 for hr in range(24)}
     rem = capacity
-    max_out = capacity * 0.5
+    max_out = capacity 
     
     # 1. Mandatory Target Hour (ONLY if it falls within the current window)
     for hr in range(24):
