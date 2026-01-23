@@ -103,7 +103,6 @@ COLUMN_NAMES_RU = {
 # --- 3. CORE FUNCTIONS (Copied Exactly) ---
 def is_biz_day(dt, year):
     if dt.month == 11 and dt.day == 1: return True
-    if dt.month == 12 and dt.day == 31: return True
     ru_holidays = holidays.Russia(years=[year])
     return not (dt.weekday() >= 5 or dt in ru_holidays)
 
