@@ -110,19 +110,27 @@ def is_biz_day(dt, year):
 def get_target_mask_from_ref(df_baseline, ref_path):
     try:
         df_ref = pd.read_excel(ref_path)
-        # Convert both to date-only to avoid timestamp mismatches
-        df_ref.iloc[:, 0] = pd.to_datetime(df_ref.iloc[:, 0], dayfirst=True).dt.date
+        # Force the reference file dates to 'YYYY-MM-DD' strings
+        df_ref.iloc[:, 0] = pd.to_datetime(df_ref.iloc[:, 0], dayfirst=True).dt.strftime('%Y-%m-%d')
         
         mask = []
         for _, row in df_baseline.iterrows():
-            current_date = pd.to_datetime(row.iloc[0]).date()
-            match = df_ref[df_ref.iloc[:, 0] == current_date]
+            # Force current row date to 'YYYY-MM-DD' string
+            current_date_str = pd.to_datetime(row.iloc[0]).strftime('%Y-%m-%d')
+            
+            # Look for the match
+            match = df_ref[df_ref.iloc[:, 0] == current_date_str]
             
             row_mask = {hr: False for hr in range(24)}
             if not match.empty:
-                hour_idx = int(match.iloc[0, 1]) - 1
-                if 0 <= hour_idx <= 23:
-                    row_mask[hour_idx] = True
+                # Get the hour (assuming it's in the second column)
+                try:
+                    hour_val = int(match.iloc[0, 1])
+                    hour_idx = hour_val - 1 # Convert 1-24 to 0-23
+                    if 0 <= hour_idx <= 23:
+                        row_mask[hour_idx] = True
+                except:
+                    pass
             mask.append(row_mask)
         return mask
     except Exception as e:
