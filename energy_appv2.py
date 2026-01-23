@@ -32,7 +32,7 @@ st.title("🔋 Расчет оптимального потребления с �
 # --- SIDEBAR INPUTS ---
 # --- SIDEBAR INPUTS ---
 st.sidebar.header("Параметры объекта")
-region_choice = st.sidebar.radio("Выберите регион:", ["Samara", "Ulyanovsk"])
+region_choice = st.sidebar.radio("Выберите регион:", ["Samara", "Ulyanovsk", "Kaliningrad"])
 month_choice = st.sidebar.selectbox("Выберите месяц:", ["nov25", "dec25"])
 
 # 1. Path logic setup
