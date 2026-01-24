@@ -390,19 +390,25 @@ if u_input:
                     # --- 3. UPDATE DATASET ---
                     for h in range(24):
                         # Grid = Load - (Discharge - Charge)
-                        new_grid_val = row[hr_cols[h]] - net_flow[h]
-                        df_sim.at[idx, hr_cols[h]] = max(0, round(new_grid_val, 4))
-                        df_schedule.at[idx, hr_cols[h]] = round(net_flow[h], 4)
-                    
+                        baseline_load = row[hr_cols[h]]
+                        actual_grid_load = baseline_load - net_flow[h]
+                        df_sim.at[idx, hr_cols[h]] = max(0, actual_grid_load)
+
+
                 # --- 4. MODULE SUMMARY ---
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
                 m_gen_p = get_gen_peak_mean(df_sim, target_mask_list, biz_mask)
                 m_gen_c = m_gen_p * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
                 m_en_c = calculate_total_energy_cost(df_sim, price_map, hr_cols)
+                total_kwh_baseline = df_raw[hr_cols].sum().sum()
+                total_kwh_sim = df_sim[hr_cols].sum().sum()
+                added_consumption = total_kwh_sim - total_kwh_baseline
+                        
 
                 summary_results.append({
                     "Setup": module_names[m], 
-                    "Total Monthly kWh": round(df_sim[hr_cols].sum().sum(), 2),
+                    "Total Monthly kWh": round(total_kwh_sim, 2),
+                    "Added from Battery": round(added_consumption, 2),
                     "Generating Peak (kW)": round(m_gen_p, 4), 
                     "Avg Assessment Peak (MW)": m_peak_mw, 
                     "Night Charge (Daily Avg kWh)": round(total_night_charge_vol/max(1, days_count), 1),
