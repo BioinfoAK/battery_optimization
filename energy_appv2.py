@@ -179,8 +179,10 @@ if u_input:
                     net_val = max(0, row[HR_COLS[h]] - final_discharge[h] + final_charge[h])
                     df_sim.at[i, HR_COLS[h]] = net_val
                     df_sch.at[i, HR_COLS[h]] = final_discharge[h] - final_charge[h]
-
-            # Re-calculating metrics for scenario
+        
+            df_sch['Total Discharged (kWh)'] = df_sch[HR_COLS].apply(lambda x: x[x > 0].sum(), axis=1)
+            df_sch['Total Charged (kWh)'] = df_sch[HR_COLS].apply(lambda x: abs(x[x < 0].sum()), axis=1)
+            df_sch['Net Energy Loss (kWh)'] = df_sch['Total Charged (kWh)'] - df_sch['Total Discharged (kWh)']
             sim_kwh = df_sim[HR_COLS].sum().sum()
             sim_net_p = df_sim[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
             sim_gen_peaks = [df_sim.loc[idx, [HR_COLS[h] for h, a in green_masks[idx].items() if a]].max() for idx in range(len(df_sim)) if biz_mask[idx]]
