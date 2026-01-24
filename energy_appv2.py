@@ -56,33 +56,40 @@ def is_biz_day(dt):
     return not (dt.weekday() >= 5 or dt in holidays.Russia(years=[dt.year]))
 
 def optimize_discharge_aggressive(row_data, target_map, capacity, active_window):
-    """
-    Shaves peaks starting from the highest until they hit zero or capacity is empty.
-    """
     discharge = np.zeros(24)
     rem = capacity
     
-    # Priority 1: Zero out Green Hours
-    for h in active_window:
+    # window_indices are the hours we are ALLOWED to help
+    window_indices = [h for h in active_window] 
+
+    # If there IS a green peak in this specific window, kill it first
+    for h in window_indices:
         if target_map.get(h, False):
             val = min(row_data[h], rem)
             discharge[h] += val
             rem -= val
-            
-    # Priority 2: Aggressive Leveling (Down to Zero)
-    if rem > 0.001:
-        while rem > 0.001:
-            current_net = row_data - discharge
-            window_loads = {h: current_net[h] for h in active_window if current_net[h] > 0.0001}
-            if not window_loads: break
-            
-            peak_h = max(window_loads, key=window_loads.get)
-            # Take the largest possible chunk to reach the next level or zero
-            step = min(rem, window_loads[peak_h])
-            discharge[peak_h] += step
-            rem -= step
-    return discharge
 
+    # Then, regardless of whether there was a green peak or not, 
+    # use the rest of the energy to flatten the remaining highest loads
+    while rem > 0.001:
+        current_net = [row_data[h] - discharge[h] for h in range(24)]
+        loads_in_window = {h: current_net[h] for h in window_indices if current_net[h] > 0.001}
+        if not loads_in_window: break
+        
+        max_val = max(loads_in_window.values())
+        peak_hours = [h for h, val in loads_in_window.items() if val >= max_val - 0.001]
+        
+        step = 0.1
+        total_needed = step * len(peak_hours)
+        if rem < total_needed:
+            for h in peak_hours: discharge[h] += rem / len(peak_hours)
+            rem = 0; break
+        else:
+            for h in peak_hours:
+                discharge[h] += step
+                rem -= step
+    return discharge
+    
 def distribute_charge(amount_to_refill, charge_window, price_map, day, price_cols, max_pwr):
     """
     Distributes the required charge across cheapest hours, respecting max power limit.
