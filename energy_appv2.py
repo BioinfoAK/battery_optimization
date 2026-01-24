@@ -182,22 +182,25 @@ def get_gen_peak_mean(df, mask_list, current_biz_mask):
 def optimize_discharge(row_data, target_map, capacity, active_window):
     discharge = {hr: 0 for hr in range(24)}
     rem = capacity
-    max_out = capacity  # Allows full 1.0C discharge (73kW for 73kWh)
+    max_out = capacity  # 1.0C Max Power limit
     
-    # 1. Mandatory Target Hour (Must be within THIS cycle's window)
+    # --- PHASE 1: MANDATORY TARGET HOURS (Green Hours) ---
     for hr in range(24):
+        # Only discharge if it's a target hour AND within this cycle's window
         if hr in active_window and target_map.get(hr, False):
             val = row_data[hr]
             actual = min(val, rem, max_out)
             discharge[hr] = actual
             rem -= actual
             
-    # 2. Aggressive Shaving (Assessment Hours)
+    # --- PHASE 2: AGGRESSIVE PEAK SHAVING (Remaining Window) ---
     if rem > 0.1 and active_window:
         shave_window = list(active_window)
         while rem > 0.01:
+            # Calculate remaining load in the window after Phase 1
             current_loads = {h: (row_data[h] - discharge[h]) for h in shave_window}
-            if not current_loads or max(current_loads.values()) <= 0:
+            
+            if not current_loads or max(current_loads.values()) <= 0.01:
                 break
             
             peak_hr = max(current_loads, key=current_loads.get)
@@ -207,6 +210,7 @@ def optimize_discharge(row_data, target_map, capacity, active_window):
                 shave_window.remove(peak_hr)
                 continue
 
+            # Shave in small increments to perfectly level the peaks
             shave_amount = min(0.1, rem, current_loads[peak_hr], can_add)
             discharge[peak_hr] += shave_amount
             rem -= shave_amount
@@ -337,10 +341,10 @@ if u_input:
             excel_data["Baseline"] = df_raw
 # --- 2. MODULES LOOP ---
             module_names = {5: "5_Modules 73kW", 6: "6_Modules 87,6kW", 7: "7_Modules 102,2kW", 8: "8_Modules 116,8kW"}
-            
+                        
             for m in MODULE_COUNTS:
                 cap = m * MODULE_KWH
-                max_charge_pwr = cap * 0.5  # 0.5C charging limit (2 hours to full)
+                max_charge_pwr = cap * 0.5  # 0.5C charging limit
                 df_sim = df_raw.copy()
                 df_schedule = df_raw.copy()
                 df_schedule[hr_cols] = 0.0
@@ -349,81 +353,70 @@ if u_input:
                 total_gap_charge_vol = 0
                 days_count = 0 
 
-                for idx, row in df_sim.iterrows():
+                for idx, row in df_raw.iterrows():
                     if not biz_mask[idx]: 
                         continue
                     
                     days_count += 1
                     day_dt = pd.to_datetime(row.iloc[0])
                     day_num = day_dt.day
-                    
-                    if day_num not in price_map: 
-                        continue
-                        
+                    if day_num not in price_map: continue
                     day_prices = price_map[day_num]
                     
-                    # --- 1. DISCHARGE CYCLE 1 (Morning) ---
-                    # Uses the first 73kWh tank
+                    # --- 1. DISCHARGE (Two Full Tanks) ---
+                    # Cycle 1: Morning
                     morning_hrs = [h for h in ALL_ASSESS if h < (min(DYN_GAP_WINDOW) if DYN_GAP_WINDOW else 13)]
                     d_morn = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, morning_hrs)
 
-                    # --- 2. DISCHARGE CYCLE 2 (Evening) ---
-                    # Subtracts morning discharge first so we don't double-discharge the same load
+                    # Cycle 2: Evening (Subtracting morning discharge impact)
                     row_remaining = row[hr_cols].values - np.array([d_morn[h] for h in range(24)])
                     evening_hrs = [h for h in ALL_ASSESS if h not in morning_hrs]
                     d_eve = optimize_discharge(row_remaining, target_mask_list[idx], cap, evening_hrs)
 
-                    # Combine cycles: Ensure no single hour exceeds physical battery power (cap)
-                    d_total = {h: min(cap, d_morn[h] + d_eve[h]) for h in range(24)}
+                    # Sum discharges and clamp to physical cap
+                    d_total_dict = {h: min(cap, d_morn[h] + d_eve[h]) for h in range(24)}
 
-                    # --- 3. CHARGE LOGIC (Updated for 2 full cycles) ---
-                    net_flow = {h: d_total[h] for h in range(24)}
+                    # --- 2. CHARGE (Two Full Refills) ---
+                    net_flow = {h: d_total_dict[h] for h in range(24)}
                     
-                    # Night Charge (Refills for the Morning)
+                    # Night Charge (Refills for Morning)
                     night_price_subset = {h: day_prices[HR_COLS[h]] for h in DYN_NIGHT_WINDOW}
                     cheapest_night = sorted(night_price_subset, key=night_price_subset.get)[:2]
-                    needed_night = cap * LOSS_FACTOR
+                    needed_night = cap * LOSS_FACTOR 
                     for h in cheapest_night:
                         charge = min(needed_night, max_charge_pwr)
-                        net_flow[h] -= charge
+                        net_flow[h] -= charge 
                         needed_night -= charge
                         total_night_charge_vol += charge
 
-                    # Gap Charge (Refills for the Evening)
+                    # Gap Charge (Refills for Evening)
                     gap_price_subset = {h: day_prices[HR_COLS[h]] for h in DYN_GAP_WINDOW}
                     cheapest_gap = sorted(gap_price_subset, key=gap_price_subset.get)[:2]
-                    needed_gap = cap * LOSS_FACTOR
+                    needed_gap = cap * LOSS_FACTOR 
                     for h in cheapest_gap:
                         charge = min(needed_gap, max_charge_pwr)
                         net_flow[h] -= charge
                         needed_gap -= charge
                         total_gap_charge_vol += charge
 
-                    # 4. APPLY TO DATAFRAME
-              # 4. APPLY TO DATAFRAME
+                    # --- 3. APPLY TO SIMULATION ---
                     for h in range(24):
-                        # Schedule is the "Battery behavior" (- is charge, + is discharge)
+                        # Grid = Building Load - (Discharge - Charge)
+                        actual_grid = row[hr_cols[h]] - net_flow[h]
+                        df_sim.at[idx, hr_cols[h]] = max(0, round(actual_grid, 4))
                         df_schedule.at[idx, hr_cols[h]] = round(net_flow[h], 4)
-                        
-                        # Sim is the "Grid Load" (Original Load - Battery Flow)
-                        # Note: if net_flow is negative (charging), subtracting it ADDS to the load.
-                        grid_load = row[hr_cols[h]] - net_flow[h]
-                        df_sim.at[idx, hr_cols[h]] = max(0, round(grid_load, 4))
 
-                # --- 5. FINAL CALCS FOR THE SPECIFIC MODULE CONFIGURATION ---
+                # --- 4. MODULE SUMMARY ---
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
                 m_gen_p = get_gen_peak_mean(df_sim, target_mask_list, biz_mask)
                 m_gen_c = m_gen_p * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
-                
-                # IMPORTANT: We calculate energy cost based on the NEW grid load (including charging costs)
                 m_en_c = calculate_total_energy_cost(df_sim, price_map, hr_cols)
 
-                # Summary Data
                 summary_results.append({
                     "Setup": module_names[m], 
-                    "Total Monthly kWh": round(df_sim[hr_cols].sum().sum(), 2), # This now includes charging energy!
+                    "Total Monthly kWh": round(df_sim[hr_cols].sum().sum(), 2),
                     "Generating Peak (kW)": round(m_gen_p, 4), 
-                    "Avg Assessment Peak (MW)": m_peak_mw, # Fixed: Keep as MW for internal consistency
+                    "Avg Assessment Peak (MW)": m_peak_mw, 
                     "Night Charge (Daily Avg kWh)": round(total_night_charge_vol/max(1, days_count), 1),
                     "Gap Charge (Daily Avg kWh)": round(total_gap_charge_vol/max(1, days_count), 1),
                     "Generating cost": round(m_gen_c, 2), 
@@ -432,6 +425,7 @@ if u_input:
                     "GRAND TOTAL COST": round(m_gen_c + m_net + m_en_c, 2),
                     "Success Rate (%)": calculate_success_rate(df_sim, target_mask_list)
                 })
+          
                 excel_data[f"{m}_Modules_Load"] = df_sim
                 excel_data[f"{m}_Schedule"] = df_schedule
 
@@ -447,8 +441,8 @@ if u_input:
                 {"": "Потребление", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 {"": "Объем потребления, кВт×ч", **{res['Setup']: res['Total Monthly kWh'] for res in summary_results}},
                 {"": "Генераторная (покупная) мощность, кВт", **{res['Setup']: res['Generating Peak (kW)'] for res in summary_results}},
-                {"": "Сетевая мощность, кВт", **{res['Setup']: round(res['Avg Assessment Peak (MW)'] * 1000, 2) for res in summary_results}},
-                {"": "", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
+                # This line ensures 0.104 MW becomes 104.0 kW across the whole table
+                {"": "Сетевая мощность, кВт", **{res['Setup']: round(res['Avg Assessment Peak (MW)'] * 1000, 2) for res in summary_results}},                {"": "", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 {"": "Тарифы", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 # FIXED: Removed extra /1000 since function already returns RUB/MWh
                 {"": "Средняя стоимость электроэнергии, руб/MВтч", **{res['Setup']: round(get_weighted_avg_price(res)/1000, 2) for res in summary_results}},
