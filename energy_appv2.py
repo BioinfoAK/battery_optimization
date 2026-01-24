@@ -174,7 +174,7 @@ if u_input:
             charge_night = np.zeros(24)
             if spent_eve > 0:
                 n_hrs = sorted(night_charge_win, key=lambda h: price_map[day][price_cols[h]])[:2]
-                    if n_hrs:
+                if n_hrs:
                     amt_to_refill = spent_eve * LOSS_FACTOR
                     for h in n_hrs:
                         charge_night[h] = amt_to_refill / len(n_hrs)
