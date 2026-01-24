@@ -352,45 +352,47 @@ if u_input:
                 total_gap_charge_vol = 0
                 days_count = 0 
 
-            for idx, row in df_raw.iterrows():
-                if not biz_mask[idx]: continue
+                # FIXED: This block must be indented INSIDE the 'for m in MODULE_COUNTS' loop
+                for idx, row in df_raw.iterrows():
+                    if not biz_mask[idx]: continue
+                        
+                    days_count += 1
+                    day_dt = pd.to_datetime(row.iloc[0])
+                    day_num = day_dt.day
+                    if day_num not in price_map: continue
+                    day_prices = price_map[day_num]
+                        
+                    # --- 1. DISCHARGE ---
+                    morning_hrs = [h for h in ALL_ASSESS if h < (min(DYN_GAP_WINDOW) if DYN_GAP_WINDOW else 13)]
+                    d_morn = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, morning_hrs)
                     
-                days_count += 1
-                day_num = pd.to_datetime(row.iloc[0]).day
-                if day_num not in price_map: continue
-                day_prices = price_map[day_num]
+                    row_remaining = row[hr_cols].values - np.array([d_morn[h] for h in range(24)])
+                    evening_hrs = [h for h in ALL_ASSESS if h not in morning_hrs]
+                    d_eve = optimize_discharge(row_remaining, target_mask_list[idx], cap, evening_hrs)
+
+                    d_total_dict = {h: min(cap, d_morn[h] + d_eve[h]) for h in range(24)}
+
+                    # --- 2. CHARGE (Two Full Refills) ---
+                    net_flow = {h: d_total_dict[h] for h in range(24)}
                     
-                    # --- DISCHARGE ---
-                morning_hrs = [h for h in ALL_ASSESS if h < (min(DYN_GAP_WINDOW) if DYN_GAP_WINDOW else 13)]
-                d_morn = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, morning_hrs)
-                row_remaining = row[hr_cols].values - np.array([d_morn[h] for h in range(24)])
-                evening_hrs = [h for h in ALL_ASSESS if h not in morning_hrs]
-                d_eve = optimize_discharge(row_remaining, target_mask_list[idx], cap, evening_hrs)
+                    # Night & Gap Charges (Always refill to 100% cap * LOSS_FACTOR)
+                    for window, vol_tracker in [(DYN_NIGHT_WINDOW, "night"), (DYN_GAP_WINDOW, "gap")]:                        
+                        subset = {h: day_prices[HR_COLS[h]] for h in window}
+                        cheapest = sorted(subset, key=subset.get)[:2]
+                        needed = cap * LOSS_FACTOR
+                        for h in cheapest:
+                            charge = min(needed, max_charge_pwr)
+                            net_flow[h] -= charge # Negative = Drawing from grid
+                            needed -= charge
+                            if vol_tracker == "night": total_night_charge_vol += charge
+                            else: total_gap_charge_vol += charge
 
-                d_total_dict = {h: min(cap, d_morn[h] + d_eve[h]) for h in range(24)}
-
-                    # --- CHARGE ---
-                net_flow = {h: d_total_dict[h] for h in range(24)}
-                    
-                    # Night & Gap Charges (Always refill to 100% cap * 1.1)
-                for window, vol_tracker in [(DYN_NIGHT_WINDOW, "night"), (DYN_GAP_WINDOW, "gap")]:                        
-                    subset = {h: day_prices[HR_COLS[h]] for h in window}
-                    cheapest = sorted(subset, key=subset.get)[:2]
-                    needed = cap * LOSS_FACTOR
-                    for h in cheapest:
-                        charge = min(needed, max_charge_pwr)
-                        net_flow[h] -= charge # Negative means drawing from grid
-                        needed -= charge
-                        if vol_tracker == "night": total_night_charge_vol += charge
-                        else: total_gap_charge_vol += charge
-
-                    # --- UPDATE GRID LOAD (This is where the summing happens) ---
-                for h in range(24):
-                        # Grid = Original Load - Battery Discharge + Battery Charge
-                        # Since net_flow is (Discharge - Charge), Load - net_flow works perfectly
-                    new_grid_val = row[hr_cols[h]] - net_flow[h]
-                    df_sim.at[idx, hr_cols[h]] = max(0, round(new_grid_val, 4))
-                    df_schedule.at[idx, hr_cols[h]] = round(net_flow[h], 4)
+                    # --- 3. UPDATE DATASET ---
+                    for h in range(24):
+                        # Grid = Load - (Discharge - Charge)
+                        new_grid_val = row[hr_cols[h]] - net_flow[h]
+                        df_sim.at[idx, hr_cols[h]] = max(0, round(new_grid_val, 4))
+                        df_schedule.at[idx, hr_cols[h]] = round(net_flow[h], 4)
                     
                 # --- 4. MODULE SUMMARY ---
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
@@ -418,21 +420,18 @@ if u_input:
 # --- 3. EXECUTIVE REPORT ---
             def get_weighted_avg_price(res_entry):
                 if res_entry['Total Monthly kWh'] == 0: return 0
-                # res_entry['Total Consumption Cost'] is RUB
-                # res_entry['Total Monthly kWh'] * KW_TO_MWH is MWh
-                # Result is RUB / MWh
+                # Cost in RUB / (Consumption in kWh converted to MWh)
                 return res_entry['Total Consumption Cost'] / (res_entry['Total Monthly kWh'] * KW_TO_MWH)
 
             v_report = [
                 {"": "Потребление", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 {"": "Объем потребления, кВт×ч", **{res['Setup']: res['Total Monthly kWh'] for res in summary_results}},
                 {"": "Генераторная (покупная) мощность, кВт", **{res['Setup']: res['Generating Peak (kW)'] for res in summary_results}},
-                # This line ensures 0.104 MW becomes 104.0 kW across the whole table
-                {"": "Сетевая мощность, кВт", **{res['Setup']: round(res['Avg Assessment Peak (MW)'] * 1000, 2) for res in summary_results}},                {"": "", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
+                # Scaling MW to kW (Fixes the 1000x issue for Baseline and Modules simultaneously)
+                {"": "Сетевая мощность, кВт", **{res['Setup']: round(res['Avg Assessment Peak (MW)'] * 1000, 2) for res in summary_results}},
+                {"": "", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 {"": "Тарифы", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
-                # FIXED: Removed extra /1000 since function already returns RUB/MWh
-                {"": "Средняя стоимость электроэнергии, руб/MВтч", **{res['Setup']: round(get_weighted_avg_price(res)/1000, 2) for res in summary_results}},
-                # FIXED: Removed /1000 to keep it as RUB/MWh (standard reporting)
+                {"": "Средняя стоимость электроэнергии, руб/MВтч", **{res['Setup']: round(get_weighted_avg_price(res), 2) for res in summary_results}},
                 {"": "Генераторная (покупная) мощность, руб/МВт", **{res['Setup']: round(TOTAL_RATE_RUB_M_WH, 2) for res in summary_results}},
                 {"": "Ставка за содержание сетей, руб/МВт", **{res['Setup']: round(NETWORK_CAPACITY_RATE, 2) for res in summary_results}},
                 {"": "", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
@@ -447,34 +446,31 @@ if u_input:
             # --- 4. EXCEL EXPORT ---
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # Summary Sheet
                 pd.DataFrame(summary_results).rename(columns=COLUMN_NAMES_RU).to_excel(writer, sheet_name="Summary", index=False)
-                # Executive Report Sheet
                 pd.DataFrame(v_report).to_excel(writer, sheet_name="Executive_Financial_Report", index=False)
-                # All calculation sheets
                 for sheet_name, df in excel_data.items():
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
+            
             base_filename = u_input.name.split('.')[0]
             dynamic_name = f"{base_filename}_{region_choice}_{month_choice}.xlsx"
 
-            
-# --- 2.5 VALIDATION DISPLAY ---
+            # --- 2.5 VALIDATION DISPLAY ---
             st.subheader("📊 Анализ циклов заряда")
             cols = st.columns(len(MODULE_COUNTS))
             for i, m in enumerate(MODULE_COUNTS):
-                res = summary_results[i+1] # +1 to skip Baseline
+                res = summary_results[i+1] # Skip Baseline
                 with cols[i]:
-                    st.metric(f"Конфиг {m}", f"{res['Night Charge (Daily Avg kWh)']} кВтч")
-                    st.caption("Заряд Ночь + Заряд Перерыв")
-                    if res['Night Charge (Daily Avg kWh)'] > (cap * 0.5 * len(DYN_NIGHT_WINDOW)):
-                        st.warning("⚠️ Ограничение мощности заряда достигнуто")
-            st.success("✅ Готово!")
+                    # Showing total daily recharge volume
+                    total_daily = res['Night Charge (Daily Avg kWh)'] + res['Gap Charge (Daily Avg kWh)']
+                    st.metric(f"Конфиг {m}", f"{total_daily} кВтч")
+                    st.caption(f"Ночь: {res['Night Charge (Daily Avg kWh)']} | Перерыв: {res['Gap Charge (Daily Avg kWh)']}")
+            
+            st.success("✅ Расчет завершен успешно!")
             st.download_button(
                 label="📥 Скачать результаты Excel",
                 data=output.getvalue(),
                 file_name=dynamic_name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-else:
-    st.info("Для начала расчета, выберите файлы.")
 
+            
