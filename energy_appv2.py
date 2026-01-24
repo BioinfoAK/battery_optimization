@@ -400,20 +400,30 @@ if u_input:
                         total_gap_charge_vol += charge
 
                     # 4. APPLY TO DATAFRAME
+              # 4. APPLY TO DATAFRAME
                     for h in range(24):
+                        # Schedule is the "Battery behavior" (- is charge, + is discharge)
                         df_schedule.at[idx, hr_cols[h]] = round(net_flow[h], 4)
-                        df_sim.at[idx, hr_cols[h]] = max(0, row[hr_cols[h]] - net_flow[h])
-                # 4. FINAL CALCS FOR MODULE
+                        
+                        # Sim is the "Grid Load" (Original Load - Battery Flow)
+                        # Note: if net_flow is negative (charging), subtracting it ADDS to the load.
+                        grid_load = row[hr_cols[h]] - net_flow[h]
+                        df_sim.at[idx, hr_cols[h]] = max(0, round(grid_load, 4))
+
+                # --- 5. FINAL CALCS FOR THE SPECIFIC MODULE CONFIGURATION ---
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
                 m_gen_p = get_gen_peak_mean(df_sim, target_mask_list, biz_mask)
                 m_gen_c = m_gen_p * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
+                
+                # IMPORTANT: We calculate energy cost based on the NEW grid load (including charging costs)
                 m_en_c = calculate_total_energy_cost(df_sim, price_map, hr_cols)
 
+                # Summary Data
                 summary_results.append({
                     "Setup": module_names[m], 
-                    "Total Monthly kWh": round(df_sim[hr_cols].sum().sum(), 2),
+                    "Total Monthly kWh": round(df_sim[hr_cols].sum().sum(), 2), # This now includes charging energy!
                     "Generating Peak (kW)": round(m_gen_p, 4), 
-                    "Avg Assessment Peak (MW)": m_peak_mw*1000,
+                    "Avg Assessment Peak (MW)": m_peak_mw, # Fixed: Keep as MW for internal consistency
                     "Night Charge (Daily Avg kWh)": round(total_night_charge_vol/max(1, days_count), 1),
                     "Gap Charge (Daily Avg kWh)": round(total_gap_charge_vol/max(1, days_count), 1),
                     "Generating cost": round(m_gen_c, 2), 
