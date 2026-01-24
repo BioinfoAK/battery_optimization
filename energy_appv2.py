@@ -182,22 +182,18 @@ def get_gen_peak_mean(df, mask_list, current_biz_mask):
 def optimize_discharge(row_data, target_map, capacity, active_window):
     discharge = {hr: 0 for hr in range(24)}
     rem = capacity
-    max_out = capacity  # Full discharge power enabled
+    max_out = capacity  # Allows full 1.0C discharge (73kW for 73kWh)
     
-    # 1. Mandatory Target Hour (PRIORITY #1)
-    # REMOVED: 'if hr in active_window'
-    # This ensures if Excel says discharge at 10:00, we do it, 
-    # even if 10:00 isn't a Network Peak hour.
+    # 1. Mandatory Target Hour (Must be within THIS cycle's window)
     for hr in range(24):
-        if target_map.get(hr, False):
+        if hr in active_window and target_map.get(hr, False):
             val = row_data[hr]
             actual = min(val, rem, max_out)
             discharge[hr] = actual
             rem -= actual
             
-    # 2. Aggressive Shaving (PRIORITY #2 - ONLY for Assessment Hours)
+    # 2. Aggressive Shaving (Assessment Hours)
     if rem > 0.1 and active_window:
-        # Create a local copy to avoid modifying the list outside the function
         shave_window = list(active_window)
         while rem > 0.01:
             current_loads = {h: (row_data[h] - discharge[h]) for h in shave_window}
@@ -344,17 +340,15 @@ if u_input:
             
             for m in MODULE_COUNTS:
                 cap = m * MODULE_KWH
-                max_charge_pwr = cap * 0.5 
+                max_charge_pwr = cap * 0.5  # 0.5C charging limit (2 hours to full)
                 df_sim = df_raw.copy()
                 df_schedule = df_raw.copy()
                 df_schedule[hr_cols] = 0.0
                 
-                # ADD THESE INITIALIZERS HERE:
                 total_night_charge_vol = 0
                 total_gap_charge_vol = 0
                 days_count = 0 
 
-                # CORRECTED INDENTATION: This loop must be inside the module loop
                 for idx, row in df_sim.iterrows():
                     if not biz_mask[idx]: 
                         continue
@@ -368,18 +362,24 @@ if u_input:
                         
                     day_prices = price_map[day_num]
                     
-                    # 1. DISCHARGE (Peak Shaving)
-                    morning_hrs = [h for h in ALL_ASSESS if h < (min(DYN_GAP_WINDOW) if DYN_GAP_WINDOW else 24)]
-                    evening_hrs = [h for h in ALL_ASSESS if h not in morning_hrs]
-                    
+                    # --- 1. DISCHARGE CYCLE 1 (Morning) ---
+                    # Uses the first 73kWh tank
+                    morning_hrs = [h for h in ALL_ASSESS if h < (min(DYN_GAP_WINDOW) if DYN_GAP_WINDOW else 13)]
                     d_morn = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, morning_hrs)
-                    d_eve = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, evening_hrs)
-                    d_total = {h: d_morn[h] + d_eve[h] for h in range(24)}
 
-                    # 2. CHARGE: PICK 2 CHEAPEST HOURS
+                    # --- 2. DISCHARGE CYCLE 2 (Evening) ---
+                    # Subtracts morning discharge first so we don't double-discharge the same load
+                    row_remaining = row[hr_cols].values - np.array([d_morn[h] for h in range(24)])
+                    evening_hrs = [h for h in ALL_ASSESS if h not in morning_hrs]
+                    d_eve = optimize_discharge(row_remaining, target_mask_list[idx], cap, evening_hrs)
+
+                    # Combine cycles: Ensure no single hour exceeds physical battery power (cap)
+                    d_total = {h: min(cap, d_morn[h] + d_eve[h]) for h in range(24)}
+
+                    # --- 3. CHARGE LOGIC (Updated for 2 full cycles) ---
                     net_flow = {h: d_total[h] for h in range(24)}
                     
-                    # Night: Cheapest 2 in DYN_NIGHT_WINDOW
+                    # Night Charge (Refills for the Morning)
                     night_price_subset = {h: day_prices[HR_COLS[h]] for h in DYN_NIGHT_WINDOW}
                     cheapest_night = sorted(night_price_subset, key=night_price_subset.get)[:2]
                     needed_night = cap * LOSS_FACTOR
@@ -389,7 +389,7 @@ if u_input:
                         needed_night -= charge
                         total_night_charge_vol += charge
 
-                    # Gap: Cheapest 2 in DYN_GAP_WINDOW
+                    # Gap Charge (Refills for the Evening)
                     gap_price_subset = {h: day_prices[HR_COLS[h]] for h in DYN_GAP_WINDOW}
                     cheapest_gap = sorted(gap_price_subset, key=gap_price_subset.get)[:2]
                     needed_gap = cap * LOSS_FACTOR
@@ -399,11 +399,10 @@ if u_input:
                         needed_gap -= charge
                         total_gap_charge_vol += charge
 
-                    # 3. APPLY TO DATAFRAME
+                    # 4. APPLY TO DATAFRAME
                     for h in range(24):
                         df_schedule.at[idx, hr_cols[h]] = round(net_flow[h], 4)
                         df_sim.at[idx, hr_cols[h]] = max(0, row[hr_cols[h]] - net_flow[h])
-
                 # 4. FINAL CALCS FOR MODULE
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
                 m_gen_p = get_gen_peak_mean(df_sim, target_mask_list, biz_mask)
