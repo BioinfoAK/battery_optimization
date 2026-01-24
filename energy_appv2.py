@@ -407,7 +407,7 @@ if u_input:
 
                 summary_results.append({
                     "Setup": module_names[m], 
-                    "Total Monthly kWh": round(total_kwh_sim, 2),
+                    "Total Monthly kWh": round(df_sim[hr_cols].sum().sum(), 2),
                     "Added from Battery": round(added_consumption, 2),
                     "Generating Peak (kW)": round(m_gen_p, 4), 
                     "Avg Assessment Peak (MW)": m_peak_mw, 
@@ -417,7 +417,8 @@ if u_input:
                     "Max network charge": m_net,
                     "Total Consumption Cost": m_en_c, 
                     "GRAND TOTAL COST": round(m_gen_c + m_net + m_en_c, 2),
-                    "Success Rate (%)": calculate_success_rate(df_sim, target_mask_list)
+                    "Success Rate (%)": calculate_success_rate(df_sim, target_mask_list),
+                    "Total Energy Bought for Battery": round(total_night_charge_vol + total_gap_charge_vol, 2)
                 })
           
                 excel_data[f"{m}_Modules_Load"] = df_sim
