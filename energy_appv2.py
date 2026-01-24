@@ -286,6 +286,8 @@ if u_input:
         with st.spinner("Рассчитываем сценарии..."):
             # 1. Load Data
             df_raw = pd.read_excel(u_input)
+            # Right after loading df_raw
+            df_raw[hr_cols] = df_raw[hr_cols].astype(float)
             # Ensure the first column is datetime
             df_raw.iloc[:, 0] = pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True)
             year = df_raw.iloc[0, 0].year
@@ -387,34 +389,32 @@ if u_input:
                             if vol_tracker == "night": total_night_charge_vol += charge
                             else: total_gap_charge_vol += charge
 
-                    # --- 3. UPDATE DATASET ---
+                  # --- 3. UPDATE DATASET ---
                     for h in range(24):
-                        # Grid = Load - (Discharge - Charge)
-                        baseline_load = row[hr_cols[h]]
-                        actual_grid_load = baseline_load - net_flow[h]
-                        df_sim.at[idx, hr_cols[h]] = max(0, actual_grid_load)
-
+                        baseline_load = float(row[hr_cols[h]])
+                        flow_val = float(net_flow[h])
+                        
+                        # Grid = Baseline - (Discharge - Charge)
+                        # Result: Baseline - Discharge + Charge
+                        actual_grid_load = baseline_load - flow_val
+                        
+                        # FIX 1 & 3: Ensure float precision and update both DataFrames
+                        df_sim.at[idx, hr_cols[h]] = float(max(0, actual_grid_load))
+                        df_schedule.at[idx, hr_cols[h]] = float(flow_val) # This makes schedules non-zero!
 
                 # --- 4. MODULE SUMMARY ---
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
                 m_gen_p = get_gen_peak_mean(df_sim, target_mask_list, biz_mask)
                 m_gen_c = m_gen_p * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
                 m_en_c = calculate_total_energy_cost(df_sim, price_map, hr_cols)
-                total_kwh_baseline = df_raw[hr_cols].sum().sum()
+                
                 total_kwh_sim = df_sim[hr_cols].sum().sum()
-                added_consumption = total_kwh_sim - total_kwh_baseline
-                # --- CALCULATE REAL LOSSES ---
-                baseline_total = df_raw[hr_cols].sum().sum()
-                sim_total = df_sim[hr_cols].sum().sum()
-                actual_loss_detected = sim_total - baseline_total
-
-# If this is 0, the math isn't writing to df_sim correctly.
-# If this is positive (e.g., 292), then the loss is there, just small!        
+                total_kwh_baseline = df_raw[hr_cols].sum().sum()
 
                 summary_results.append({
                     "Setup": module_names[m], 
-                    "Total Monthly kWh": round(df_sim[hr_cols].sum().sum(), 2),
-                    "Added from Battery": round(added_consumption, 2),
+                    "Total Monthly kWh": round(total_kwh_sim, 2),
+                    "Added from Battery": round(total_kwh_sim - total_kwh_baseline, 2),
                     "Generating Peak (kW)": round(m_gen_p, 4), 
                     "Avg Assessment Peak (MW)": m_peak_mw, 
                     "Night Charge (Daily Avg kWh)": round(total_night_charge_vol/max(1, days_count), 1),
@@ -425,10 +425,9 @@ if u_input:
                     "GRAND TOTAL COST": round(m_gen_c + m_net + m_en_c, 2),
                     "Success Rate (%)": calculate_success_rate(df_sim, target_mask_list),
                     "Total Energy Bought for Battery": round(total_night_charge_vol + total_gap_charge_vol, 2),
-                    "Baseline kWh": round(baseline_total, 2),
-                    "System Energy Loss": round(sim_total - baseline_total, 2), # This SHOULD be ~292 for 5 modules
-                    "Energy Cycle Efficiency": f"{round((baseline_total / sim_total) * 100, 1)}%" 
-    # ... rest of your data
+                    "Baseline kWh": round(total_kwh_baseline, 2),
+                    "System Energy Loss": round(total_kwh_sim - total_kwh_baseline, 2), 
+                    "Energy Cycle Efficiency": f"{round((total_kwh_baseline / total_kwh_sim) * 100, 1)}%" 
                 })
           
                 excel_data[f"{m}_Modules_Load"] = df_sim
@@ -448,8 +447,8 @@ if u_input:
                 {"": "Сетевая мощность, кВт", **{res['Setup']: round(res['Avg Assessment Peak (MW)'] * 1000, 2) for res in summary_results}},
                 {"": "", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 {"": "Тарифы", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
-                {"": "Средняя стоимость электроэнергии, руб/MВтч", **{res['Setup']: round(get_weighted_avg_price(res)/1000, 2) for res in summary_results}},
-                {"": "Генераторная (покупная) мощность, руб/МВт", **{res['Setup']: round(TOTAL_RATE_RUB_M_WH, 2) for res in summary_results}},
+                # Remove the /1000 so you can see the full RUB/MWh value (e.g., 8450.23)
+                {"": "Средняя стоимость электроэнергии, руб/MВтч", **{res['Setup']: round(get_weighted_avg_price(res), 2) for res in summary_results}},                {"": "Генераторная (покупная) мощность, руб/МВт", **{res['Setup']: round(TOTAL_RATE_RUB_M_WH, 2) for res in summary_results}},
                 {"": "Ставка за содержание сетей, руб/МВт", **{res['Setup']: round(NETWORK_CAPACITY_RATE, 2) for res in summary_results}},
                 {"": "", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 {"": "ИТОГО:", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
