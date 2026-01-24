@@ -286,24 +286,24 @@ if u_input:
         with st.spinner("Рассчитываем сценарии..."):
             # 1. Load Data
             df_raw = pd.read_excel(u_input)
-            # Right after loading df_raw
+            
+            # --- FIX 1: Define hr_cols early and force float type ---
+            hr_cols = HR_COLS 
             df_raw[hr_cols] = df_raw[hr_cols].astype(float)
+            
             # Ensure the first column is datetime
             df_raw.iloc[:, 0] = pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True)
             year = df_raw.iloc[0, 0].year
             
-            # 2. Setup Masks and Columns
+            # 2. Setup Masks
             biz_mask = df_raw.iloc[:, 0].apply(lambda x: is_biz_day(x, year))
-        
-            # Using the path constructed from your Region/Month buttons
             target_mask_list = get_target_mask_from_ref(df_raw, REF_HOURS_PATH)
             
             if target_mask_list is None:
                 st.stop() 
-            # --- 1. PRE-CALCULATION SETUP ---
-            hr_cols = HR_COLS 
+
             ALL_ASSESS = get_assessment_hours(ASSESS_FILE_PATH, month_choice)
-            st.caption(f"📊 Часы оценки (Peak Shaving) для {month_choice}: {ALL_ASSESS}")
+            st.caption(f"📊 Часы оценки для {month_choice}: {ALL_ASSESS}")
 
             # Define windows
             first_peak = min(ALL_ASSESS) if ALL_ASSESS else 7
@@ -318,9 +318,8 @@ if u_input:
 
             summary_results = []
             excel_data = {}
-            # --- 2. BASELINE (ФАКТ) ---
 
-            # --- 2. BASELINE (ФАКТ) ---
+            # --- BASELINE (ФАКТ) ---
             net_charge_base, peak_mw_base = calculate_network_charge_average(df_raw, biz_mask, hr_cols)
             gen_peak_base = get_gen_peak_mean(df_raw, target_mask_list, biz_mask)
             gen_cost_base = gen_peak_base * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
@@ -330,9 +329,7 @@ if u_input:
                 "Setup": "ФАКТ", 
                 "Total Monthly kWh": round(df_raw[hr_cols].sum().sum(), 2),
                 "Generating Peak (kW)": round(gen_peak_base, 4), 
-                "Avg Assessment Peak (MW)": peak_mw_base, # Keep as MW (e.g., 0.104)
-                "Night Charge (Daily Avg kWh)": 0,
-                "Gap Charge (Daily Avg kWh)": 0,
+                "Avg Assessment Peak (MW)": peak_mw_base,
                 "Generating cost": round(gen_cost_base, 2), 
                 "Max network charge": net_charge_base,
                 "Total Consumption Cost": energy_cost_base, 
@@ -340,31 +337,30 @@ if u_input:
                 "Success Rate (%)": calculate_success_rate(df_raw, target_mask_list)
             })
             excel_data["Baseline"] = df_raw
-# --- 2. MODULES LOOP ---
+
+            # --- MODULES LOOP ---
             module_names = {5: "5_Modules 73kW", 6: "6_Modules 87,6kW", 7: "7_Modules 102,2kW", 8: "8_Modules 116,8kW"}
-                        
+            
             for m in MODULE_COUNTS:
                 cap = m * MODULE_KWH
-                max_charge_pwr = cap * 0.5  # 0.5C charging limit
-                df_sim = df_raw.copy()
-                df_schedule = df_raw.copy()
+                max_charge_pwr = cap * 0.5 
+                df_sim = df_raw.copy().astype(float) # Ensure floats
+                df_schedule = df_raw.copy().astype(float)
                 df_schedule[hr_cols] = 0.0
                 
                 total_night_charge_vol = 0
                 total_gap_charge_vol = 0
                 days_count = 0 
 
-                # FIXED: This block must be indented INSIDE the 'for m in MODULE_COUNTS' loop
                 for idx, row in df_raw.iterrows():
                     if not biz_mask[idx]: continue
-                        
-                    days_count += 1
-                    day_dt = pd.to_datetime(row.iloc[0])
-                    day_num = day_dt.day
+                    day_num = pd.to_datetime(row.iloc[0]).day
                     if day_num not in price_map: continue
+                    
+                    days_count += 1
                     day_prices = price_map[day_num]
-                        
-                    # --- 1. DISCHARGE ---
+                    
+                    # Discharge
                     morning_hrs = [h for h in ALL_ASSESS if h < (min(DYN_GAP_WINDOW) if DYN_GAP_WINDOW else 13)]
                     d_morn = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, morning_hrs)
                     
@@ -373,44 +369,35 @@ if u_input:
                     d_eve = optimize_discharge(row_remaining, target_mask_list[idx], cap, evening_hrs)
 
                     d_total_dict = {h: min(cap, d_morn[h] + d_eve[h]) for h in range(24)}
-
-                    # --- 2. CHARGE (Two Full Refills) ---
                     net_flow = {h: d_total_dict[h] for h in range(24)}
                     
-                    # Night & Gap Charges (Always refill to 100% cap * LOSS_FACTOR)
+                    # Charge
                     for window, vol_tracker in [(DYN_NIGHT_WINDOW, "night"), (DYN_GAP_WINDOW, "gap")]:                        
                         subset = {h: day_prices[HR_COLS[h]] for h in window}
                         cheapest = sorted(subset, key=subset.get)[:2]
                         needed = cap * LOSS_FACTOR
                         for h in cheapest:
                             charge = min(needed, max_charge_pwr)
-                            net_flow[h] -= charge # Negative = Drawing from grid
+                            net_flow[h] -= charge 
                             needed -= charge
                             if vol_tracker == "night": total_night_charge_vol += charge
                             else: total_gap_charge_vol += charge
 
-                  # --- 3. UPDATE DATASET ---
+                    # --- FIX 2 & 4: Update schedule and force float math ---
                     for h in range(24):
-                        baseline_load = float(row[hr_cols[h]])
-                        flow_val = float(net_flow[h])
-                        
-                        # Grid = Baseline - (Discharge - Charge)
-                        # Result: Baseline - Discharge + Charge
-                        actual_grid_load = baseline_load - flow_val
-                        
-                        # FIX 1 & 3: Ensure float precision and update both DataFrames
-                        df_sim.at[idx, hr_cols[h]] = float(max(0, actual_grid_load))
-                        df_schedule.at[idx, hr_cols[h]] = float(flow_val) # This makes schedules non-zero!
+                        b_val = float(row[hr_cols[h]])
+                        f_val = float(net_flow[h])
+                        df_sim.at[idx, hr_cols[h]] = max(0.0, b_val - f_val)
+                        df_schedule.at[idx, hr_cols[h]] = f_val # Schedule is now filled!
 
-                # --- 4. MODULE SUMMARY ---
+                # --- SUMMARY ---
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
                 m_gen_p = get_gen_peak_mean(df_sim, target_mask_list, biz_mask)
                 m_gen_c = m_gen_p * KW_TO_MWH * TOTAL_RATE_RUB_M_WH
                 m_en_c = calculate_total_energy_cost(df_sim, price_map, hr_cols)
                 
                 total_kwh_sim = df_sim[hr_cols].sum().sum()
-                total_kwh_baseline = df_raw[hr_cols].sum().sum()
-
+                
                 summary_results.append({
                     "Setup": module_names[m], 
                     "Total Monthly kWh": round(total_kwh_sim, 2),
@@ -429,17 +416,14 @@ if u_input:
                     "System Energy Loss": round(total_kwh_sim - total_kwh_baseline, 2), 
                     "Energy Cycle Efficiency": f"{round((total_kwh_baseline / total_kwh_sim) * 100, 1)}%" 
                 })
-          
                 excel_data[f"{m}_Modules_Load"] = df_sim
                 excel_data[f"{m}_Schedule"] = df_schedule
 
-# --- 3. EXECUTIVE REPORT ---
+            # --- EXECUTIVE REPORT ---
             def get_weighted_avg_price(res_entry):
                 if res_entry['Total Monthly kWh'] == 0: return 0
-                # Cost in RUB / (Consumption in kWh converted to MWh)
                 return res_entry['Total Consumption Cost'] / (res_entry['Total Monthly kWh'] * KW_TO_MWH)
-
-            v_report = [
+             v_report = [
                 {"": "Потребление", "ФАКТ": "", "5_Modules 73kW": "", "6_Modules 87,6kW": "", "7_Modules 102,2kW": "", "8_Modules 116,8kW": ""},
                 {"": "Объем потребления, кВт×ч", **{res['Setup']: res['Total Monthly kWh'] for res in summary_results}},
                 {"": "Генераторная (покупная) мощность, кВт", **{res['Setup']: res['Generating Peak (kW)'] for res in summary_results}},
@@ -459,7 +443,7 @@ if u_input:
                 {"": "Стоимость с НДС 20%, руб", **{res['Setup']: round(res['GRAND TOTAL COST'] * 1.20, 2) for res in summary_results}}
             ]
 
-            # --- 4. EXCEL EXPORT ---
+            # Excel and Download logic follows...
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 pd.DataFrame(summary_results).rename(columns=COLUMN_NAMES_RU).to_excel(writer, sheet_name="Summary", index=False)
@@ -467,26 +451,8 @@ if u_input:
                 for sheet_name, df in excel_data.items():
                     df.to_excel(writer, sheet_name=sheet_name, index=False)
             
-            base_filename = u_input.name.split('.')[0]
-            dynamic_name = f"{base_filename}_{region_choice}_{month_choice}.xlsx"
+            st.success("✅ Расчет завершен!")
+            st.download_button("📥 Скачать результаты", output.getvalue(), file_name=f"results_{month_choice}.xlsx")
 
-            # --- 2.5 VALIDATION DISPLAY ---
-            st.subheader("📊 Анализ циклов заряда")
-            cols = st.columns(len(MODULE_COUNTS))
-            for i, m in enumerate(MODULE_COUNTS):
-                res = summary_results[i+1] # Skip Baseline
-                with cols[i]:
-                    # Showing total daily recharge volume
-                    total_daily = res['Night Charge (Daily Avg kWh)'] + res['Gap Charge (Daily Avg kWh)']
-                    st.metric(f"Конфиг {m}", f"{total_daily} кВтч")
-                    st.caption(f"Ночь: {res['Night Charge (Daily Avg kWh)']} | Перерыв: {res['Gap Charge (Daily Avg kWh)']}")
-            
-            st.success("✅ Расчет завершен успешно!")
-            st.download_button(
-                label="📥 Скачать результаты Excel",
-                data=output.getvalue(),
-                file_name=dynamic_name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
 
-            
+
