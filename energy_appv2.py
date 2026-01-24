@@ -403,7 +403,13 @@ if u_input:
                 total_kwh_baseline = df_raw[hr_cols].sum().sum()
                 total_kwh_sim = df_sim[hr_cols].sum().sum()
                 added_consumption = total_kwh_sim - total_kwh_baseline
-                        
+                # --- CALCULATE REAL LOSSES ---
+                baseline_total = df_raw[hr_cols].sum().sum()
+                sim_total = df_sim[hr_cols].sum().sum()
+                actual_loss_detected = sim_total - baseline_total
+
+# If this is 0, the math isn't writing to df_sim correctly.
+# If this is positive (e.g., 292), then the loss is there, just small!        
 
                 summary_results.append({
                     "Setup": module_names[m], 
@@ -418,7 +424,11 @@ if u_input:
                     "Total Consumption Cost": m_en_c, 
                     "GRAND TOTAL COST": round(m_gen_c + m_net + m_en_c, 2),
                     "Success Rate (%)": calculate_success_rate(df_sim, target_mask_list),
-                    "Total Energy Bought for Battery": round(total_night_charge_vol + total_gap_charge_vol, 2)
+                    "Total Energy Bought for Battery": round(total_night_charge_vol + total_gap_charge_vol, 2),
+                    "Baseline kWh": round(baseline_total, 2),
+                    "System Energy Loss": round(sim_total - baseline_total, 2), # This SHOULD be ~292 for 5 modules
+                    "Energy Cycle Efficiency": f"{round((baseline_total / sim_total) * 100, 1)}%" 
+    # ... rest of your data
                 })
           
                 excel_data[f"{m}_Modules_Load"] = df_sim
