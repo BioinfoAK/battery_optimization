@@ -352,47 +352,46 @@ if u_input:
                 total_gap_charge_vol = 0
                 days_count = 0 
 
-               for idx, row in df_raw.iterrows():
-                    if not biz_mask[idx]: continue
+            for idx, row in df_raw.iterrows():
+                if not biz_mask[idx]: continue
                     
-                    days_count += 1
-                    day_num = pd.to_datetime(row.iloc[0]).day
-                    if day_num not in price_map: continue
-                    day_prices = price_map[day_num]
+                days_count += 1
+                day_num = pd.to_datetime(row.iloc[0]).day
+                if day_num not in price_map: continue
+                day_prices = price_map[day_num]
                     
                     # --- DISCHARGE ---
-                    morning_hrs = [h for h in ALL_ASSESS if h < (min(DYN_GAP_WINDOW) if DYN_GAP_WINDOW else 13)]
-                    d_morn = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, morning_hrs)
+                morning_hrs = [h for h in ALL_ASSESS if h < (min(DYN_GAP_WINDOW) if DYN_GAP_WINDOW else 13)]
+                d_morn = optimize_discharge(row[hr_cols].values, target_mask_list[idx], cap, morning_hrs)
+                row_remaining = row[hr_cols].values - np.array([d_morn[h] for h in range(24)])
+                evening_hrs = [h for h in ALL_ASSESS if h not in morning_hrs]
+                d_eve = optimize_discharge(row_remaining, target_mask_list[idx], cap, evening_hrs)
 
-                    row_remaining = row[hr_cols].values - np.array([d_morn[h] for h in range(24)])
-                    evening_hrs = [h for h in ALL_ASSESS if h not in morning_hrs]
-                    d_eve = optimize_discharge(row_remaining, target_mask_list[idx], cap, evening_hrs)
-
-                    d_total_dict = {h: min(cap, d_morn[h] + d_eve[h]) for h in range(24)}
+                d_total_dict = {h: min(cap, d_morn[h] + d_eve[h]) for h in range(24)}
 
                     # --- CHARGE ---
-                    net_flow = {h: d_total_dict[h] for h in range(24)}
+                net_flow = {h: d_total_dict[h] for h in range(24)}
                     
                     # Night & Gap Charges (Always refill to 100% cap * 1.1)
-                    for window, vol_tracker in [(DYN_NIGHT_WINDOW, "night"), (DYN_GAP_WINDOW, "gap")]:
-                        subset = {h: day_prices[HR_COLS[h]] for h in window}
-                        cheapest = sorted(subset, key=subset.get)[:2]
-                        needed = cap * LOSS_FACTOR
-                        for h in cheapest:
-                            charge = min(needed, max_charge_pwr)
-                            net_flow[h] -= charge # Negative means drawing from grid
-                            needed -= charge
-                            if vol_tracker == "night": total_night_charge_vol += charge
-                            else: total_gap_charge_vol += charge
+                for window, vol_tracker in [(DYN_NIGHT_WINDOW, "night"), (DYN_GAP_WINDOW, "gap")]:                        
+                    subset = {h: day_prices[HR_COLS[h]] for h in window}
+                    cheapest = sorted(subset, key=subset.get)[:2]
+                    needed = cap * LOSS_FACTOR
+                    for h in cheapest:
+                        charge = min(needed, max_charge_pwr)
+                        net_flow[h] -= charge # Negative means drawing from grid
+                        needed -= charge
+                        if vol_tracker == "night": total_night_charge_vol += charge
+                        else: total_gap_charge_vol += charge
 
                     # --- UPDATE GRID LOAD (This is where the summing happens) ---
-                    for h in range(24):
+                for h in range(24):
                         # Grid = Original Load - Battery Discharge + Battery Charge
                         # Since net_flow is (Discharge - Charge), Load - net_flow works perfectly
-                        new_grid_val = row[hr_cols[h]] - net_flow[h]
-                        df_sim.at[idx, hr_cols[h]] = max(0, round(new_grid_val, 4))
-                        df_schedule.at[idx, hr_cols[h]] = round(net_flow[h], 4)
-                        
+                    new_grid_val = row[hr_cols[h]] - net_flow[h]
+                    df_sim.at[idx, hr_cols[h]] = max(0, round(new_grid_val, 4))
+                    df_schedule.at[idx, hr_cols[h]] = round(net_flow[h], 4)
+                    
                 # --- 4. MODULE SUMMARY ---
                 m_net, m_peak_mw = calculate_network_charge_average(df_sim, biz_mask, hr_cols)
                 m_gen_p = get_gen_peak_mean(df_sim, target_mask_list, biz_mask)
