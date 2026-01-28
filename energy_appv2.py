@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -56,42 +57,71 @@ def is_biz_day(dt):
     return not (dt.weekday() >= 5 or dt in holidays.Russia(years=[dt.year]))
 
 def optimize_discharge_aggressive(row_data, target_map, capacity, active_window):
+    """
+    Creates a perfectly flat plateau by iteratively lowering the highest values 
+    in the window until energy is exhausted.
+    """
     discharge = np.zeros(24)
     rem = capacity
+    
+    # Filter window to only hours that actually have load
     window_indices = [h for h in active_window if row_data[h] > 0]
     if not window_indices:
         return discharge
 
+    # 1. First priority: Try to hit absolute zero on 'Green Hours' if they exist
     for h in window_indices:
         if target_map.get(h, False):
             val = min(row_data[h], rem)
             discharge[h] += val
             rem -= val
 
+    # 2. Second priority: Minimize variation and lower the 'ceiling' of the block
+    # We loop until capacity is gone or we hit zero
     while rem > 0.0001:
         current_net = [row_data[h] - discharge[h] for h in range(24)]
         loads_in_window = {h: current_net[h] for h in window_indices if current_net[h] > 0.0001}
-        if not loads_in_window: break
+        
+        if not loads_in_window:
+            break
+            
         max_val = max(loads_in_window.values())
+        # Find all hours that are currently at the highest level (the plateau)
         peak_hours = [h for h, val in loads_in_window.items() if val >= max_val - 0.0001]
+        
+        # Calculate how much we can drop the plateau before hitting the next highest peak
+        # or hitting zero.
         remaining_loads = sorted(list(set(loads_in_window.values())), reverse=True)
         next_val = remaining_loads[1] if len(remaining_loads) > 1 else 0
+        
+        # The 'depth' we want to shave
         target_shave_depth = max_val - next_val
         total_energy_needed = target_shave_depth * len(peak_hours)
+        
         if rem >= total_energy_needed:
-            for h in peak_hours: discharge[h] += target_shave_depth
+            # We have enough to bring the whole plateau down to the next level
+            for h in peak_hours:
+                discharge[h] += target_shave_depth
             rem -= total_energy_needed
         else:
+            # We don't have enough to reach the next level, so spread 
+            # the remaining energy evenly across all current peaks
             shave_per_hour = rem / len(peak_hours)
-            for h in peak_hours: discharge[h] += shave_per_hour
+            for h in peak_hours:
+                discharge[h] += shave_per_hour
             rem = 0
+            
     return discharge
     
 def distribute_charge(amount_to_refill, charge_window, price_map, day, price_cols, max_pwr):
+    """
+    Distributes the required charge across cheapest hours, respecting max power limit.
+    """
     charge_profile = np.zeros(24)
     rem_to_charge = amount_to_refill
-    if not charge_window: return charge_profile
+    # Sort hours by price
     sorted_hrs = sorted(charge_window, key=lambda h: price_map[day][price_cols[h]])
+    
     for h in sorted_hrs:
         if rem_to_charge <= 0: break
         can_take = min(rem_to_charge, max_pwr)
@@ -107,6 +137,7 @@ if u_input:
     df_raw.iloc[:, 0] = pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True)
     df_raw[HR_COLS] = df_raw[HR_COLS].astype(float)
     
+    # Assessment & Windows
     try:
         df_h = pd.read_excel(f"reference_data/{REGION_PATH}/hours/assessment_hours.xlsx")
         raw_h = df_h[month_choice].dropna().tolist()
@@ -127,6 +158,7 @@ if u_input:
     if st.button("🚀 Начать расчет"):
         biz_mask = df_raw.iloc[:, 0].apply(is_biz_day)
         
+        # Generating Hours Mask
         df_ref = pd.read_excel(f"reference_data/{REGION_PATH}/hours/generating_hours_{month_choice.lower()}.xlsx")
         df_ref.iloc[:, 0] = pd.to_datetime(df_ref.iloc[:, 0], dayfirst=True).dt.date
         green_masks = []
@@ -142,9 +174,20 @@ if u_input:
         results = []
         excel_sheets = {"Baseline": df_raw}
 
-        for m in [5, 6, 7, 8]:
-            cap_limit = m * MODULE_KWH 
+        # FACT Metrics
+        base_kwh = df_raw[HR_COLS].sum().sum()
+        net_peak_f = df_raw[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
+        gen_peaks = [df_raw.loc[i, [HR_COLS[h] for h, a in green_masks[i].items() if a]].max() for i in range(len(df_raw)) if biz_mask[i]]
+        gen_peak_f = np.mean([p for p in gen_peaks if not np.isnan(p)]) if gen_peaks else 0
+        en_cost_f = sum(row[HR_COLS[h]] * (price_map[row.iloc[0].day][price_cols[h]]/1000) for i, row in df_raw.iterrows() if row.iloc[0].day in price_map for h in range(24))
+
+        results.append({"Setup": "ФАКТ", "Total Monthly kWh": round(base_kwh, 2), "Generating Peak (kW)": round(gen_peak_f, 4), "Avg Assessment Peak (MW)": round(net_peak_f/1000, 4), "Generating cost": round(gen_peak_f*KW_TO_MWH*TOTAL_RATE_MWH, 2), "Max network charge": round((net_peak_f/1000)*NETWORK_RATE_MWH, 2), "Total Consumption Cost": round(en_cost_f, 2), "GRAND TOTAL COST": round(en_cost_f + (gen_peak_f*KW_TO_MWH*TOTAL_RATE_MWH) + ((net_peak_f/1000)*NETWORK_RATE_MWH), 2)})
+
+    for m in [5, 6, 7, 8]:
+            cap_limit = m * MODULE_KWH # e.g., 73.0 kWh
             max_chg_pwr = cap_limit * 0.5
+            
+            # --- FIX: Initializing DataFrames INSIDE the loop so they reset for each module count ---
             df_sim = df_raw.copy()
             df_sch = df_raw.copy()
             df_sch[HR_COLS] = 0.0 
@@ -158,51 +201,64 @@ if u_input:
                 current_rem_cap = cap_limit
                 morn_d = np.zeros(24)
                 
+                # A. Priority 1: Zero out Green Hours in the morning block
                 for h in morn_assess:
                     if green_masks[i].get(h, False):
                         val = min(row[HR_COLS[h]], current_rem_cap)
                         morn_d[h] = val
                         current_rem_cap -= val 
                 
+                # B. Priority 2: Level the remaining morning peaks
                 if current_rem_cap > 0:
-                    m_leveling = optimize_discharge_aggressive(row[HR_COLS].values - morn_d, {}, current_rem_cap, morn_assess)
+                    m_leveling = optimize_discharge_aggressive(
+                        row[HR_COLS].values - morn_d, 
+                        {}, 
+                        current_rem_cap, 
+                        morn_assess
+                    )
                     morn_d += m_leveling
-                    current_rem_cap -= sum(m_leveling)
                 
                 spent_m = sum(morn_d)
+                # FIX: Using 'day_of_month' instead of 'i' to avoid KeyError in price_map
                 charge_gap = distribute_charge(spent_m * LOSS_FACTOR, gap_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
 
                 # --- 2. EVENING CYCLE ---
-                actual_stored_midday = sum(charge_gap) / LOSS_FACTOR
-                current_rem_cap = min(current_rem_cap + actual_stored_midday, cap_limit)
-                
+                current_rem_cap = cap_limit 
                 eve_d = np.zeros(24)
                 load_after_morn = row[HR_COLS].values - morn_d + charge_gap
                 
+                # A. Priority 1: Zero out Green Hours in the evening block
                 for h in eve_assess:
                     if green_masks[i].get(h, False):
                         val = min(load_after_morn[h], current_rem_cap)
                         eve_d[h] = val
                         current_rem_cap -= val 
                 
+                # B. Priority 2: Level the evening block
                 if current_rem_cap > 0:
-                    e_leveling = optimize_discharge_aggressive(load_after_morn - eve_d, {}, current_rem_cap, eve_assess)
+                    e_leveling = optimize_discharge_aggressive(
+                        load_after_morn - eve_d, 
+                        {}, 
+                        current_rem_cap, 
+                        eve_assess
+                    )
                     eve_d += e_leveling
-                    current_rem_cap -= sum(e_leveling)
                 
                 spent_e = sum(eve_d)
                 charge_night = distribute_charge(spent_e * LOSS_FACTOR, night_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
 
-                # --- 3. DATA PERSISTENCE ---
+                # --- 3. APPLY TO DATAFRAMES ---
                 final_discharge = morn_d + eve_d
                 final_charge = charge_gap + charge_night
                 
                 for h in range(24):
                     net_val = max(0, row[HR_COLS[h]] - final_discharge[h] + final_charge[h])
+                    
+                    # FIX: Use 'i' directly. It is the label provided by iterrows().
                     df_sim.at[i, HR_COLS[h]] = round(net_val, 4)
                     df_sch.at[i, HR_COLS[h]] = round(final_discharge[h] - final_charge[h], 4)
             
-            # --- 4. CALCULATE SUMMARY ---
+            # --- 4. CALCULATE SUMMARY COLUMNS ---
             df_sch['Выдано батареей (кВтч)'] = df_sch[HR_COLS].apply(lambda x: round(x[x > 0].sum(), 4), axis=1)
             df_sch['Заряжено (кВтч)'] = df_sch[HR_COLS].apply(lambda x: round(x[x < 0].sum(), 4), axis=1)
             df_sch['Потери (кВтч)'] = round(df_sch['Заряжено (кВтч)'] + df_sch['Выдано батареей (кВтч)'], 4)
@@ -210,12 +266,15 @@ if u_input:
             sim_kwh = df_sim[HR_COLS].sum().sum()
             sim_net_p = df_sim[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
             
+            # Robust logic for generating peaks across days
             sim_gen_peaks = []
             for idx in df_sim.index[biz_mask]:
                 active_h = [HR_COLS[h] for h, a in green_masks[idx].items() if a]
-                if active_h: sim_gen_peaks.append(df_sim.loc[idx, active_h].max())
+                if active_h:
+                    sim_gen_peaks.append(df_sim.loc[idx, active_h].max())
             sim_gen_p = np.mean(sim_gen_peaks) if sim_gen_peaks else 0
             
+            # Robust cost calculation (matches your en_cost_f logic)
             sim_en_c = 0
             for idx, row in df_sim.iterrows():
                 d = row.iloc[0].day
@@ -224,6 +283,7 @@ if u_input:
             
             total_c = round(sim_en_c + (sim_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((sim_net_p/1000)*NETWORK_RATE_MWH), 2)
             
+            # FIX: Setup string now correctly uses cap_limit
             results.append({
                 "Setup": f"{m}_Modules {round(cap_limit,1)}kWh", 
                 "Total Monthly kWh": round(sim_kwh, 2), 
@@ -234,9 +294,10 @@ if u_input:
                 "Total Consumption Cost": round(sim_en_c, 2), 
                 "GRAND TOTAL COST": total_c
             })
-            excel_sheets[f"{m}_Modules_Load"] = df_sim; excel_sheets[f"{m}_Schedule"] = df_sch
+            excel_sheets[f"{m}_Modules_Load"] = df_sim
+            excel_sheets[f"{m}_Schedule"] = df_sch
 
-        # Executive report and export (unchanged logic)
+        # --- EXECUTIVE REPORT ---
         v_cols = [r['Setup'] for r in results]
         v_report = [
             {"": "Потребление", **{c: "" for c in v_cols}},
@@ -245,7 +306,7 @@ if u_input:
             {"": "Сетевая мощность, кВт", **{r['Setup']: round(r['Avg Assessment Peak (MW)']*1000, 2) for r in results}},
             {"": "", **{c: "" for c in v_cols}},
             {"": "Тарифы", **{c: "" for c in v_cols}},
-            {"": "Средняя стоимость электроэнергии, руб/кВтч", **{r['Setup']: round(r['Total Consumption Cost']/r['Total Monthly kWh'], 2) if r['Total Monthly kWh'] > 0 else 0 for r in results}},
+            {"": "Средняя стоимость электроэнергии, руб/кВтч", **{r['Setup']: round(r['Total Consumption Cost']/r['Total Monthly kWh'], 2) for r in results}},
             {"": "Генераторная мощность, руб/МВт", **{c: round(TOTAL_RATE_MWH, 2) for c in v_cols}},
             {"": "Ставка за содержание сетей, руб/МВт", **{c: round(NETWORK_RATE_MWH, 2) for c in v_cols}},
             {"": "", **{c: "" for c in v_cols}},
@@ -257,6 +318,7 @@ if u_input:
             {"": "Стоимость с НДС 20%, руб", **{r['Setup']: round(r['GRAND TOTAL COST']*1.2, 2) for r in results}}
         ]
 
+        # --- SAVE & DOWNLOAD ---
         orig_name = Path(u_input.name).stem
         final_fn = f"{orig_name}_{region_choice}_{month_choice}.xlsx"
         out = BytesIO()
