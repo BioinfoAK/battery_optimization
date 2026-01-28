@@ -90,6 +90,7 @@ def optimize_discharge_aggressive(row_data, target_map, capacity, active_window)
 def distribute_charge(amount_to_refill, charge_window, price_map, day, price_cols, max_pwr):
     charge_profile = np.zeros(24)
     rem_to_charge = amount_to_refill
+    if not charge_window: return charge_profile
     sorted_hrs = sorted(charge_window, key=lambda h: price_map[day][price_cols[h]])
     for h in sorted_hrs:
         if rem_to_charge <= 0: break
@@ -141,21 +142,9 @@ if u_input:
         results = []
         excel_sheets = {"Baseline": df_raw}
 
-        # FACT Metrics
-        base_kwh = df_raw[HR_COLS].sum().sum()
-        net_peak_f = df_raw[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
-        gen_peaks = [df_raw.loc[i, [HR_COLS[h] for h, a in green_masks[i].items() if a]].max() for i in range(len(df_raw)) if biz_mask[i]]
-        gen_peak_f = np.mean([p for p in gen_peaks if not np.isnan(p)]) if gen_peaks else 0
-        en_cost_f = sum(row[HR_COLS[h]] * (price_map[row.iloc[0].day][price_cols[h]]/1000) for i, row in df_raw.iterrows() if row.iloc[0].day in price_map for h in range(24))
-
-        results.append({"Setup": "ФАКТ", "Total Monthly kWh": round(base_kwh, 2), "Generating Peak (kW)": round(gen_peak_f, 4), "Avg Assessment Peak (MW)": round(net_peak_f/1000, 4), "Generating cost": round(gen_peak_f*KW_TO_MWH*TOTAL_RATE_MWH, 2), "Max network charge": round((net_peak_f/1000)*NETWORK_RATE_MWH, 2), "Total Consumption Cost": round(en_cost_f, 2), "GRAND TOTAL COST": round(en_cost_f + (gen_peak_f*KW_TO_MWH*TOTAL_RATE_MWH) + ((net_peak_f/1000)*NETWORK_RATE_MWH), 2)})
-
-        # --- MOVED INSIDE THE BUTTON BLOCK ---
-        # --- START OF VERIFIED LOOP ---
         for m in [5, 6, 7, 8]:
             cap_limit = m * MODULE_KWH 
             max_chg_pwr = cap_limit * 0.5
-            
             df_sim = df_raw.copy()
             df_sch = df_raw.copy()
             df_sch[HR_COLS] = 0.0 
@@ -166,67 +155,54 @@ if u_input:
                 if day_of_month not in price_map: continue
                 
                 # --- 1. MORNING CYCLE ---
-                # --- 1. MORNING CYCLE ---
                 current_rem_cap = cap_limit
                 morn_d = np.zeros(24)
                 
-                # Priority 1: Morning Green Hours
                 for h in morn_assess:
                     if green_masks[i].get(h, False):
                         val = min(row[HR_COLS[h]], current_rem_cap)
                         morn_d[h] = val
                         current_rem_cap -= val 
                 
-                # Priority 2: Morning Leveling
                 if current_rem_cap > 0:
-                    m_leveling = optimize_discharge_aggressive(
-                        row[HR_COLS].values - morn_d, 
-                        {}, 
-                        current_rem_cap, 
-                        morn_assess
-                    )
+                    m_leveling = optimize_discharge_aggressive(row[HR_COLS].values - morn_d, {}, current_rem_cap, morn_assess)
                     morn_d += m_leveling
-                    current_rem_cap -= sum(m_leveling) # Final morning residual
+                    current_rem_cap -= sum(m_leveling)
                 
                 spent_m = sum(morn_d)
-                # Refill during midday gap
                 charge_gap = distribute_charge(spent_m * LOSS_FACTOR, gap_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
 
                 # --- 2. EVENING CYCLE ---
-                # FIX: Capacity = (What was left) + (What we actually managed to charge)
                 actual_stored_midday = sum(charge_gap) / LOSS_FACTOR
                 current_rem_cap = min(current_rem_cap + actual_stored_midday, cap_limit)
                 
                 eve_d = np.zeros(24)
                 load_after_morn = row[HR_COLS].values - morn_d + charge_gap
                 
-                # Priority 1: Evening Green Hours (Must happen first)
                 for h in eve_assess:
                     if green_masks[i].get(h, False):
                         val = min(load_after_morn[h], current_rem_cap)
                         eve_d[h] = val
-                        current_rem_cap -= val # Capacity is lowered by Green Hour usage
+                        current_rem_cap -= val 
                 
-                # Priority 2: Evening Leveling (Uses remaining capacity)
                 if current_rem_cap > 0:
-                    e_leveling = optimize_discharge_aggressive(
-                        load_after_morn - eve_d, 
-                        {}, 
-                        current_rem_cap, 
-                        eve_assess
-                    )
+                    e_leveling = optimize_discharge_aggressive(load_after_morn - eve_d, {}, current_rem_cap, eve_assess)
                     eve_d += e_leveling
+                    current_rem_cap -= sum(e_leveling)
+                
+                spent_e = sum(eve_d)
+                charge_night = distribute_charge(spent_e * LOSS_FACTOR, night_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
+
                 # --- 3. DATA PERSISTENCE ---
-                    final_discharge = morn_d + eve_d
-                    final_charge = charge_gap + charge_night
+                final_discharge = morn_d + eve_d
+                final_charge = charge_gap + charge_night
                 
                 for h in range(24):
                     net_val = max(0, row[HR_COLS[h]] - final_discharge[h] + final_charge[h])
-                    # Using 'i' as the explicit index label
                     df_sim.at[i, HR_COLS[h]] = round(net_val, 4)
                     df_sch.at[i, HR_COLS[h]] = round(final_discharge[h] - final_charge[h], 4)
             
-            # --- 4. CALCULATE SUMMARY COLUMNS ---
+            # --- 4. CALCULATE SUMMARY ---
             df_sch['Выдано батареей (кВтч)'] = df_sch[HR_COLS].apply(lambda x: round(x[x > 0].sum(), 4), axis=1)
             df_sch['Заряжено (кВтч)'] = df_sch[HR_COLS].apply(lambda x: round(x[x < 0].sum(), 4), axis=1)
             df_sch['Потери (кВтч)'] = round(df_sch['Заряжено (кВтч)'] + df_sch['Выдано батареей (кВтч)'], 4)
@@ -260,7 +236,7 @@ if u_input:
             })
             excel_sheets[f"{m}_Modules_Load"] = df_sim; excel_sheets[f"{m}_Schedule"] = df_sch
 
-        # --- EXECUTIVE REPORT ---
+        # Executive report and export (unchanged logic)
         v_cols = [r['Setup'] for r in results]
         v_report = [
             {"": "Потребление", **{c: "" for c in v_cols}},
@@ -269,7 +245,7 @@ if u_input:
             {"": "Сетевая мощность, кВт", **{r['Setup']: round(r['Avg Assessment Peak (MW)']*1000, 2) for r in results}},
             {"": "", **{c: "" for c in v_cols}},
             {"": "Тарифы", **{c: "" for c in v_cols}},
-            {"": "Средняя стоимость электроэнергии, руб/кВтч", **{r['Setup']: round(r['Total Consumption Cost']/r['Total Monthly kWh'], 2) for r in results}},
+            {"": "Средняя стоимость электроэнергии, руб/кВтч", **{r['Setup']: round(r['Total Consumption Cost']/r['Total Monthly kWh'], 2) if r['Total Monthly kWh'] > 0 else 0 for r in results}},
             {"": "Генераторная мощность, руб/МВт", **{c: round(TOTAL_RATE_MWH, 2) for c in v_cols}},
             {"": "Ставка за содержание сетей, руб/МВт", **{c: round(NETWORK_RATE_MWH, 2) for c in v_cols}},
             {"": "", **{c: "" for c in v_cols}},
@@ -281,7 +257,6 @@ if u_input:
             {"": "Стоимость с НДС 20%, руб", **{r['Setup']: round(r['GRAND TOTAL COST']*1.2, 2) for r in results}}
         ]
 
-        # --- SAVE & DOWNLOAD ---
         orig_name = Path(u_input.name).stem
         final_fn = f"{orig_name}_{region_choice}_{month_choice}.xlsx"
         out = BytesIO()
