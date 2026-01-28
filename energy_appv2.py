@@ -182,32 +182,77 @@ if u_input:
 
         results.append({"Setup": "ФАКТ", "Total Monthly kWh": round(base_kwh, 2), "Generating Peak (kW)": round(gen_peak_f, 4), "Avg Assessment Peak (MW)": round(net_peak_f/1000, 4), "Generating cost": round(gen_peak_f*KW_TO_MWH*TOTAL_RATE_MWH, 2), "Max network charge": round((net_peak_f/1000)*NETWORK_RATE_MWH, 2), "Total Consumption Cost": round(en_cost_f, 2), "GRAND TOTAL COST": round(en_cost_f + (gen_peak_f*KW_TO_MWH*TOTAL_RATE_MWH) + ((net_peak_f/1000)*NETWORK_RATE_MWH), 2)})
 
-        for m in [5, 6, 7, 8]:
-            cap = m * MODULE_KWH
-            max_chg_pwr = cap * 0.5
-            df_sim = df_raw.copy(); df_sch = df_raw.copy(); df_sch[HR_COLS] = 0.0
+       for m in [5, 6, 7, 8]:
+            cap_limit = m * MODULE_KWH # e.g., 73.0 kWh
+            max_chg_pwr = cap_limit * 0.5
             
+            # ... (dataframe setup) ...
+
             for i, row in df_raw.iterrows():
                 if not biz_mask[i]: continue
-                day = row.iloc[0].day
-                if day not in price_map: continue
+                day_of_month = row.iloc[0].day
+                if day_of_month not in price_map: continue
                 
-                # 1. Morning Cycle
-                morn_d = optimize_discharge_aggressive(row[HR_COLS].values, green_masks[i], cap, morn_assess)
-                charge_gap = distribute_charge(sum(morn_d) * LOSS_FACTOR, gap_charge_win, price_map, day, price_cols, max_chg_pwr)
+                # --- 1. MORNING CYCLE ---
+                current_rem_cap = cap_limit
+                morn_d = np.zeros(24)
                 
-                # 2. Evening Cycle
-                load_after_morn = row[HR_COLS].values - morn_d + charge_gap
-                eve_d = optimize_discharge_aggressive(load_after_morn, green_masks[i], cap, eve_assess)
-                charge_night = distribute_charge(sum(eve_d) * LOSS_FACTOR, night_charge_win, price_map, day, price_cols, max_chg_pwr)
+                # A. Priority 1: Zero out Green Hours in the morning block
+                for h in morn_assess:
+                    if green_masks[i].get(h, False):
+                        val = min(row[HR_COLS[h]], current_rem_cap)
+                        morn_d[h] = val
+                        current_rem_cap -= val # REDUCE THE 73kWh BUDGET
+                
+                # B. Priority 2: Level the remaining morning peaks with what's left
+                if current_rem_cap > 0:
+                    # Pass only the REMAINING capacity to the leveling function
+                    m_leveling = optimize_discharge_aggressive(
+                        row[HR_COLS].values - morn_d, 
+                        {}, # Pass empty mask so it doesn't try to zero green hours again
+                        current_rem_cap, 
+                        morn_assess
+                    )
+                    morn_d += m_leveling
+                
+                # Calculate charge for the gap (what was actually spent)
+                spent_m = sum(morn_d)
+                charge_gap = distribute_charge(spent_m * LOSS_FACTOR, gap_charge_win, price_map, i, price_cols, max_chg_pwr)
 
+                # --- 2. EVENING CYCLE ---
+                current_rem_cap = cap_limit # Reset to 73.0 after mid-day refill
+                eve_d = np.zeros(24)
+                load_after_morn = row[HR_COLS].values - morn_d + charge_gap
+                
+                # A. Priority 1: Zero out Green Hours in the evening block
+                for h in eve_assess:
+                    if green_masks[i].get(h, False):
+                        val = min(load_after_morn[h], current_rem_cap)
+                        eve_d[h] = val
+                        current_rem_cap -= val # REDUCE THE 73kWh BUDGET
+                
+                # B. Priority 2: Level the evening block with remaining capacity
+                if current_rem_cap > 0:
+                    e_leveling = optimize_discharge_aggressive(
+                        load_after_morn - eve_d, 
+                        {}, 
+                        current_rem_cap, 
+                        eve_assess
+                    )
+                    eve_d += e_leveling
+                
+                # Final Night Charge
+                spent_e = sum(eve_d)
+                charge_night = distribute_charge(spent_e * LOSS_FACTOR, night_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
                 final_discharge = morn_d + eve_d
                 final_charge = charge_gap + charge_night
                 
                 for h in range(24):
+                    # Net consumption = Base + Charge - Discharge
                     net_val = max(0, row[HR_COLS[h]] - final_discharge[h] + final_charge[h])
-                    df_sim.at[i, HR_COLS[h]] = net_val
-                    df_sch.at[i, HR_COLS[h]] = final_discharge[h] - final_charge[h]
+                    df_sim.at[i, HR_COLS[h]] = round(net_val, 4)
+                    # Schedule = Discharge (pos) and Charge (neg)
+                    df_sch.at[i, HR_COLS[h]] = round(final_discharge[h] - final_charge[h], 4)# ... (apply final_discharge and final_charge to dataframes) ...
         
             df_sch['Выдано батареей (кВтч)'] = df_sch[HR_COLS].apply(lambda x: x[x > 0].sum(), axis=1)
             df_sch['Заряжено (кВтч)'] = df_sch[HR_COLS].apply(lambda x: x[x < 0].sum(), axis=1)
