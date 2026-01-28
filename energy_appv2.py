@@ -108,17 +108,14 @@ if u_input:
     df_raw.iloc[:, 0] = pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True)
     df_raw[HR_COLS] = df_raw[HR_COLS].astype(float)
     
-    try:
-        df_h = pd.read_excel(f"reference_data/{REGION_PATH}/hours/assessment_hours.xlsx")
-        raw_h = df_h[month_choice].dropna().tolist()
-        ALL_ASSESS = sorted([int(str(h).split(':')[0]) if ':' in str(h) else int(float(h)) for h in raw_h])
+# STRICT FILE-BASED HOURS (No backup)
+    df_h = pd.read_excel(f"reference_data/{REGION_PATH}/hours/assessment_hours.xlsx")
+    raw_h = df_h[month_choice].dropna().tolist()
+    ALL_ASSESS = sorted([int(str(h).split(':')[0]) if ':' in str(h) else int(float(h)) for h in raw_h])
 
-
-    gaps = [ALL_ASSESS[i+1] - ALL_ASSESS[i] for i in range(len(ALL_ASSESS)-1)]
-    split_idx = gaps.index(max(gaps)) + 1 if gaps else 0
-    morn_assess, eve_assess = ALL_ASSESS[:split_idx], ALL_ASSESS[split_idx:]
-    night_charge_win = list(range(0, min(ALL_ASSESS)))
-    gap_charge_win = list(range(max(morn_assess)+1, min(eve_assess))) if eve_assess else []
+    # Dynamic Charging Windows: Anywhere NOT in the assessment list
+    all_possible_hrs = set(range(24))
+    charge_windows = sorted(list(all_possible_hrs - set(ALL_ASSESS)))
 
     df_p = pd.read_excel(f"reference_data/{REGION_PATH}/tariffs/hourly_tariffs_{month_choice.lower()}.xlsx")
     price_map = df_p.set_index(df_p.columns[0]).to_dict('index')
