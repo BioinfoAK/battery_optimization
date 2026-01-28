@@ -182,11 +182,14 @@ if u_input:
 
         results.append({"Setup": "ФАКТ", "Total Monthly kWh": round(base_kwh, 2), "Generating Peak (kW)": round(gen_peak_f, 4), "Avg Assessment Peak (MW)": round(net_peak_f/1000, 4), "Generating cost": round(gen_peak_f*KW_TO_MWH*TOTAL_RATE_MWH, 2), "Max network charge": round((net_peak_f/1000)*NETWORK_RATE_MWH, 2), "Total Consumption Cost": round(en_cost_f, 2), "GRAND TOTAL COST": round(en_cost_f + (gen_peak_f*KW_TO_MWH*TOTAL_RATE_MWH) + ((net_peak_f/1000)*NETWORK_RATE_MWH), 2)})
 
-        for m in [5, 6, 7, 8]:
+    for m in [5, 6, 7, 8]:
             cap_limit = m * MODULE_KWH # e.g., 73.0 kWh
             max_chg_pwr = cap_limit * 0.5
             
-            # ... (dataframe setup) ...
+            # --- FIX: Initializing DataFrames INSIDE the loop so they reset for each module count ---
+            df_sim = df_raw.copy()
+            df_sch = df_raw.copy()
+            df_sch[HR_COLS] = 0.0 
 
             for i, row in df_raw.iterrows():
                 if not biz_mask[i]: continue
@@ -202,25 +205,24 @@ if u_input:
                     if green_masks[i].get(h, False):
                         val = min(row[HR_COLS[h]], current_rem_cap)
                         morn_d[h] = val
-                        current_rem_cap -= val # REDUCE THE 73kWh BUDGET
+                        current_rem_cap -= val 
                 
-                # B. Priority 2: Level the remaining morning peaks with what's left
+                # B. Priority 2: Level the remaining morning peaks
                 if current_rem_cap > 0:
-                    # Pass only the REMAINING capacity to the leveling function
                     m_leveling = optimize_discharge_aggressive(
                         row[HR_COLS].values - morn_d, 
-                        {}, # Pass empty mask so it doesn't try to zero green hours again
+                        {}, 
                         current_rem_cap, 
                         morn_assess
                     )
                     morn_d += m_leveling
                 
-                # Calculate charge for the gap (what was actually spent)
                 spent_m = sum(morn_d)
-                charge_gap = distribute_charge(spent_m * LOSS_FACTOR, gap_charge_win, price_map, i, price_cols, max_chg_pwr)
+                # FIX: Using 'day_of_month' instead of 'i' to avoid KeyError in price_map
+                charge_gap = distribute_charge(spent_m * LOSS_FACTOR, gap_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
 
                 # --- 2. EVENING CYCLE ---
-                current_rem_cap = cap_limit # Reset to 73.0 after mid-day refill
+                current_rem_cap = cap_limit 
                 eve_d = np.zeros(24)
                 load_after_morn = row[HR_COLS].values - morn_d + charge_gap
                 
@@ -229,9 +231,9 @@ if u_input:
                     if green_masks[i].get(h, False):
                         val = min(load_after_morn[h], current_rem_cap)
                         eve_d[h] = val
-                        current_rem_cap -= val # REDUCE THE 73kWh BUDGET
+                        current_rem_cap -= val 
                 
-                # B. Priority 2: Level the evening block with remaining capacity
+                # B. Priority 2: Level the evening block
                 if current_rem_cap > 0:
                     e_leveling = optimize_discharge_aggressive(
                         load_after_morn - eve_d, 
@@ -241,39 +243,58 @@ if u_input:
                     )
                     eve_d += e_leveling
                 
-                # Final Night Charge
                 spent_e = sum(eve_d)
                 charge_night = distribute_charge(spent_e * LOSS_FACTOR, night_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
+
                 # --- 3. APPLY TO DATAFRAMES ---
                 final_discharge = morn_d + eve_d
                 final_charge = charge_gap + charge_night
                 
                 for h in range(24):
-                    # Net consumption = Base Load - Discharge + Charge
                     net_val = max(0, row[HR_COLS[h]] - final_discharge[h] + final_charge[h])
                     
-                    # Use .at with the specific index label from the row
-                    row_idx = df_sim.index[i] 
-                    
-                    df_sim.at[row_idx, HR_COLS[h]] = round(net_val, 4)
-                    # Schedule: Battery gives (pos), Battery takes (neg)
-                    df_sch.at[row_idx, HR_COLS[h]] = round(final_discharge[h] - final_charge[h], 4)
-                    
-            df_sch['Выдано батареей (кВтч)'] = df_sch[HR_COLS].apply(lambda x: x[x > 0].sum(), axis=1)
-            df_sch['Заряжено (кВтч)'] = df_sch[HR_COLS].apply(lambda x: x[x < 0].sum(), axis=1)
-            df_sch['Потери (кВтч)'] = df_sch['Заряжено (кВтч)'] + df_sch['Выдано батареей (кВтч)']
+                    # FIX: Use 'i' directly. It is the label provided by iterrows().
+                    df_sim.at[i, HR_COLS[h]] = round(net_val, 4)
+                    df_sch.at[i, HR_COLS[h]] = round(final_discharge[h] - final_charge[h], 4)
             
-            # Переименовываем основные столбцы для наглядности (опционально)
-            # Если вы хотите оставить HR_COLS на английском, пропустите этот шаг
+            # --- 4. CALCULATE SUMMARY COLUMNS ---
+            df_sch['Выдано батареей (кВтч)'] = df_sch[HR_COLS].apply(lambda x: round(x[x > 0].sum(), 4), axis=1)
+            df_sch['Заряжено (кВтч)'] = df_sch[HR_COLS].apply(lambda x: round(x[x < 0].sum(), 4), axis=1)
+            df_sch['Потери (кВтч)'] = round(df_sch['Заряжено (кВтч)'] + df_sch['Выдано батареей (кВтч)'], 4)
+            
             sim_kwh = df_sim[HR_COLS].sum().sum()
             sim_net_p = df_sim[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
-            sim_gen_peaks = [df_sim.loc[idx, [HR_COLS[h] for h, a in green_masks[idx].items() if a]].max() for idx in range(len(df_sim)) if biz_mask[idx]]
-            sim_gen_p = np.mean([p for p in sim_gen_peaks if not np.isnan(p)]) if sim_gen_peaks else 0
-            sim_en_c = sum(df_sim.iloc[idx][HR_COLS[h]] * (price_map[df_sim.iloc[idx,0].day][price_cols[h]]/1000) for idx in range(len(df_sim)) for h in range(24) if df_sim.iloc[idx,0].day in price_map)
+            
+            # Robust logic for generating peaks across days
+            sim_gen_peaks = []
+            for idx in df_sim.index[biz_mask]:
+                active_h = [HR_COLS[h] for h, a in green_masks[idx].items() if a]
+                if active_h:
+                    sim_gen_peaks.append(df_sim.loc[idx, active_h].max())
+            sim_gen_p = np.mean(sim_gen_peaks) if sim_gen_peaks else 0
+            
+            # Robust cost calculation (matches your en_cost_f logic)
+            sim_en_c = 0
+            for idx, row in df_sim.iterrows():
+                d = row.iloc[0].day
+                if d in price_map:
+                    sim_en_c += sum(row[HR_COLS[h]] * (price_map[d][price_cols[h]]/1000) for h in range(24))
             
             total_c = round(sim_en_c + (sim_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((sim_net_p/1000)*NETWORK_RATE_MWH), 2)
-            results.append({"Setup": f"{m}_Modules {round(cap,1)}kW", "Total Monthly kWh": round(sim_kwh, 2), "Generating Peak (kW)": round(sim_gen_p, 4), "Avg Assessment Peak (MW)": round(sim_net_p/1000, 4), "Generating cost": round(sim_gen_p*KW_TO_MWH*TOTAL_RATE_MWH, 2), "Max network charge": round((sim_net_p/1000)*NETWORK_RATE_MWH, 2), "Total Consumption Cost": round(sim_en_c, 2), "GRAND TOTAL COST": total_c})
-            excel_sheets[f"{m}_Modules_Load"] = df_sim; excel_sheets[f"{m}_Schedule"] = df_sch
+            
+            # FIX: Setup string now correctly uses cap_limit
+            results.append({
+                "Setup": f"{m}_Modules {round(cap_limit,1)}kWh", 
+                "Total Monthly kWh": round(sim_kwh, 2), 
+                "Generating Peak (kW)": round(sim_gen_p, 4), 
+                "Avg Assessment Peak (MW)": round(sim_net_p/1000, 4), 
+                "Generating cost": round(sim_gen_p*KW_TO_MWH*TOTAL_RATE_MWH, 2), 
+                "Max network charge": round((sim_net_p/1000)*NETWORK_RATE_MWH, 2), 
+                "Total Consumption Cost": round(sim_en_c, 2), 
+                "GRAND TOTAL COST": total_c
+            })
+            excel_sheets[f"{m}_Modules_Load"] = df_sim
+            excel_sheets[f"{m}_Schedule"] = df_sch
 
         # --- EXECUTIVE REPORT ---
         v_cols = [r['Setup'] for r in results]
