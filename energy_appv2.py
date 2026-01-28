@@ -7,11 +7,11 @@ from pathlib import Path
 
 # --- 1. UI & ACCESS ---
 st.set_page_config(page_title="Расчет оптимального потребления", layout="wide")
-st.title("🔋 Расчет оптимального потребления с помощью батареи")
+st.title("🔋 Расчет: 13 модулей и Сравнение стратегий")
 
 def check_password():
     if "password_correct" not in st.session_state:
-        st.text_input("Введите пароль для доступа к системе", type="password", on_change=password_entered, key="password")
+        st.text_input("Введите пароль", type="password", on_change=password_entered, key="password")
         return False
     return st.session_state["password_correct"]
 
@@ -27,8 +27,8 @@ if not check_password():
 
 # --- 2. SIDEBAR CONFIG ---
 st.sidebar.header("Параметры объекта")
-region_choice = st.sidebar.radio("Выберите регион:", ["Samara", "Ulyanovsk", "Kaliningrad"])
-month_choice = st.sidebar.selectbox("Выберите месяц:", ["jan25", "feb25", "mar25", "apr25", "may25", "jun25", "jul25", "aug25", "sep25", "oct25", "nov25", "dec25", "jan26"])
+region_choice = st.sidebar.radio("Регион:", ["Samara", "Ulyanovsk", "Kaliningrad"])
+month_choice = st.sidebar.selectbox("Месяц:", ["jan25", "feb25", "mar25", "apr25", "may25", "jun25", "jul25", "aug25", "sep25", "oct25", "nov25", "dec25", "jan26"])
 
 REGION_PATH = region_choice.lower()
 try:
@@ -47,7 +47,7 @@ TOTAL_RATE_MWH = gen_pwr + gen_adm
 NETWORK_RATE_MWH = net_rate
 KW_TO_MWH = 1 / 1000
 MODULE_KWH = 14.6
-LOSS_FACTOR = 1.10 
+LOSS_FACTOR = 1.10 # 10% loss during charging
 HR_COLS = [f"{h}.00-{h+1}.00" for h in range(24)]
 
 # --- 3. CORE LOGIC ---
@@ -68,7 +68,7 @@ def optimize_discharge_aggressive(row_data, target_map, capacity, active_window)
             discharge[h] += val
             rem -= val
 
-    # Priority 2: General Peak Shaving in Assessment Window
+    # Priority 2: General Peak Shaving
     while rem > 0.0001:
         current_net = [row_data[h] - discharge[h] for h in range(24)]
         loads_in_window = {h: current_net[h] for h in window_indices if current_net[h] > 0.0001}
@@ -88,16 +88,20 @@ def optimize_discharge_aggressive(row_data, target_map, capacity, active_window)
             rem = 0
     return discharge
     
-def distribute_charge(amount_to_refill, charge_window, price_map, day, price_cols, max_pwr):
+def distribute_charge(energy_to_store, charge_window, price_map, day, price_cols, max_pwr):
+    """
+    energy_to_store: net kWh to be put into battery
+    Returns: array of 24h grid consumption (includes losses)
+    """
     charge_profile = np.zeros(24)
-    rem_to_charge = amount_to_refill
+    rem_grid = energy_to_store * LOSS_FACTOR # We pull 10% more from grid
     if not charge_window: return charge_profile
     sorted_hrs = sorted(charge_window, key=lambda h: price_map[day][price_cols[h]])
     for h in sorted_hrs:
-        if rem_to_charge <= 0: break
-        can_take = min(rem_to_charge, max_pwr)
+        if rem_grid <= 0: break
+        can_take = min(rem_grid, max_pwr * LOSS_FACTOR)
         charge_profile[h] = can_take
-        rem_to_charge -= can_take
+        rem_grid -= can_take
     return charge_profile
 
 # --- 4. EXECUTION ---
@@ -136,14 +140,16 @@ if u_input:
             match = df_ref[df_ref.iloc[:, 0] == d]
             h_m = {h: False for h in range(24)}
             if not match.empty:
-                h_idx = int(match.iloc[0, 1]) - 1
+                # FIX: 20 in file -> 19 in index (19.00-20.00)
+                h_val = int(float(match.iloc[0, 1])) 
+                h_idx = h_val - 1 
                 if 0 <= h_idx <= 23: h_m[h_idx] = True
             green_masks.append(h_m)
 
         results = []
         excel_sheets = {"Baseline": df_raw}
 
-        # --- FACT (BASELINE) ---
+        # --- FACT ---
         base_kwh = df_raw[HR_COLS].sum().sum()
         base_net_p = df_raw[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
         base_gen_peaks = [df_raw.loc[i, [HR_COLS[h] for h, a in green_masks[i].items() if a]].max() for i in range(len(df_raw)) if biz_mask[i]]
@@ -157,95 +163,71 @@ if u_input:
             "GRAND TOTAL COST": round(base_en_c + (base_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((base_net_p/1000)*NETWORK_RATE_MWH), 2)
         })
 
-        # --- CONFIGURATIONS ---
-        configs = [5, 6, 7, 8]
-        if region_choice == "Kaliningrad":
-            configs += [13, "13_NoGen"]
-
+        # --- CONFIGS ---
+        # 13 modules with Current Approach vs disregarding generating hour
+        configs = [13, "13_LevelingOnly"]
         for config in configs:
-            is_no_gen = (config == "13_NoGen")
-            m = 13 if is_no_gen else config
+            is_no_gen = (config == "13_LevelingOnly")
+            m = 13
             cap_limit = m * MODULE_KWH
-            max_chg_pwr = cap_limit * 0.5
+            max_pwr = cap_limit * 0.5
             
-            df_sim = df_raw.copy()
-            df_sch = df_raw.copy()
-            df_sch[HR_COLS] = 0.0
+            df_sim = df_raw.copy(); df_sch = df_raw.copy(); df_sch[HR_COLS] = 0.0
 
             for i, row in df_raw.iterrows():
-                if not biz_mask[i]: continue
+                if not biz_mask[i] or row.iloc[0].day not in price_map: continue
                 day_d = row.iloc[0].day
-                if day_d not in price_map: continue
+                active_mask = {} if is_no_gen else green_masks[i]
                 
-                # Experiment Logic: Empty mask if we are disregarding gen hours
-                active_green_mask = {} if is_no_gen else green_masks[i]
+                # Cycles
+                cur_usable = cap_limit
+                m_d = optimize_discharge_aggressive(row[HR_COLS].values, active_mask, cur_usable, morn_assess)
+                c_gap = distribute_charge(sum(m_d), gap_charge_win, price_map, day_d, price_cols, max_pwr)
                 
-                # Morning Cycle
-                current_rem = cap_limit
-                morn_d = optimize_discharge_aggressive(row[HR_COLS].values, active_green_mask, current_rem, morn_assess)
-                current_rem -= sum(morn_d)
-                chg_gap = distribute_charge(sum(morn_d) * LOSS_FACTOR, gap_charge_win, price_map, day_d, price_cols, max_chg_pwr)
+                # Update usable capacity for evening (Spent morning, added back charge)
+                cur_usable = (cap_limit - sum(m_d)) + (sum(c_gap)/LOSS_FACTOR)
+                cur_usable = min(cur_usable, cap_limit)
                 
-                # Evening Cycle
-                current_rem = min(current_rem + (sum(chg_gap)/LOSS_FACTOR), cap_limit)
-                load_ev = row[HR_COLS].values - morn_d + chg_gap
-                eve_d = optimize_discharge_aggressive(load_ev, active_green_mask, current_rem, eve_assess)
-                chg_night = distribute_charge(sum(eve_d) * LOSS_FACTOR, night_charge_win, price_map, day_d, price_cols, max_chg_pwr)
+                l_after = row[HR_COLS].values - m_d + c_gap
+                e_d = optimize_discharge_aggressive(l_after, active_mask, cur_usable, eve_assess)
+                c_night = distribute_charge(sum(e_d), night_charge_win, price_map, day_d, price_cols, max_pwr)
 
-                final_d = morn_d + eve_d
-                final_c = chg_gap + chg_night
+                f_dis = m_d + e_d; f_chg = c_gap + c_night
                 for h in range(24):
-                    # Accounting for usage: net grid consumption = (load - discharge + charge)
-                    net = max(0, row[HR_COLS[h]] - final_d[h] + final_c[h])
-                    df_sim.at[i, HR_COLS[h]] = net
-                    df_sch.at[i, HR_COLS[h]] = final_d[h] - final_c[h]
-
-            # Results Compilation
+                    df_sim.at[i, HR_COLS[h]] = max(0, row[HR_COLS[h]] - f_dis[h] + f_chg[h])
+                    df_sch.at[i, HR_COLS[h]] = f_dis[h] - f_chg[h]
+            
+            # Metrics
             sim_kwh = df_sim[HR_COLS].sum().sum()
             sim_net_p = df_sim[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
             sim_gen_peaks = [df_sim.loc[idx, [HR_COLS[h] for h, a in green_masks[idx].items() if a]].max() for idx in df_sim.index[biz_mask]]
             sim_gen_p = np.mean([p for p in sim_gen_peaks if not np.isnan(p)]) if sim_gen_peaks else 0
             sim_en_c = sum(row[HR_COLS[h]] * (price_map[row.iloc[0].day][price_cols[h]]/1000) for _, row in df_sim.iterrows() if row.iloc[0].day in price_map for h in range(24))
-
-            label = f"{m}_Modules" + ("_LevelingOnly" if is_no_gen else "")
-            setup_name = f"{label} {round(cap_limit,1)}kWh"
+            
+            label = f"{m} Модулей" + (" (Без ген. часа)" if is_no_gen else " (Стандарт)")
             results.append({
-                "Setup": setup_name, "Total Monthly kWh": round(sim_kwh, 2), "Generating Peak (kW)": round(sim_gen_p, 4),
-                "Avg Assessment Peak (MW)": round(sim_net_p/1000, 4), "Generating cost": round(sim_gen_p*KW_TO_MWH*TOTAL_RATE_MWH, 2),
-                "Max network charge": round((sim_net_p/1000)*NETWORK_RATE_MWH, 2), "Total Consumption Cost": round(sim_en_c, 2),
+                "Setup": label, "Total Monthly kWh": round(sim_kwh, 2), "Generating Peak (kW)": round(sim_gen_p, 4), 
+                "Avg Assessment Peak (MW)": round(sim_net_p/1000, 4), "Generating cost": round(sim_gen_p*KW_TO_MWH*TOTAL_RATE_MWH, 2), 
+                "Max network charge": round((sim_net_p/1000)*NETWORK_RATE_MWH, 2), "Total Consumption Cost": round(sim_en_c, 2), 
                 "GRAND TOTAL COST": round(sim_en_c + (sim_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((sim_net_p/1000)*NETWORK_RATE_MWH), 2)
             })
             excel_sheets[f"{label}_Load"] = df_sim
-            excel_sheets[f"{label}_Sched"] = df_sch
 
-        # --- 5. EXECUTIVE REPORT ---
+        # --- REPORTING ---
         v_cols = [r['Setup'] for r in results]
         v_report = [
-            {"": "Потребление", **{c: "" for c in v_cols}},
             {"": "Объем потребления, кВт×ч", **{r['Setup']: r['Total Monthly kWh'] for r in results}},
             {"": "Генераторная мощность, кВт", **{r['Setup']: r['Generating Peak (kW)'] for r in results}},
             {"": "Сетевая мощность, кВт", **{r['Setup']: round(r['Avg Assessment Peak (MW)']*1000, 2) for r in results}},
-            {"": "", **{c: "" for c in v_cols}},
-            {"": "Тарифы", **{c: "" for c in v_cols}},
-            {"": "Средняя стоимость электроэнергии, руб/кВтч", **{r['Setup']: round(r['Total Consumption Cost']/r['Total Monthly kWh'], 2) if r['Total Monthly kWh'] > 0 else 0 for r in results}},
-            {"": "Генераторная мощность, руб/МВт", **{c: round(TOTAL_RATE_MWH, 2) for c in v_cols}},
-            {"": "Ставка за содержание сетей, руб/МВт", **{c: round(NETWORK_RATE_MWH, 2) for c in v_cols}},
-            {"": "", **{c: "" for c in v_cols}},
-            {"": "ИТОГО:", **{c: "" for c in v_cols}},
-            {"": "Стоимость электроэнергии, руб", **{r['Setup']: r['Total Consumption Cost'] for r in results}},
-            {"": "Стоимость генераторной, руб", **{r['Setup']: r['Generating cost'] for r in results}},
-            {"": "Стоимость сетевой, руб", **{r['Setup']: r['Max network charge'] for r in results}},
-            {"": "Стоимость без НДС 20%, руб", **{r['Setup']: r['GRAND TOTAL COST'] for r in results}},
-            {"": "Стоимость с НДС 20%, руб", **{r['Setup']: round(r['GRAND TOTAL COST']*1.2, 2) for r in results}}
+            {"": "Средняя стоимость руб/кВтч", **{r['Setup']: round(r['Total Consumption Cost']/r['Total Monthly kWh'], 2) if r['Total Monthly kWh'] > 0 else 0 for r in results}},
+            {"": "ИТОГО руб (без НДС)", **{r['Setup']: r['GRAND TOTAL COST'] for r in results}},
+            {"": "ИТОГО руб (с НДС)", **{r['Setup']: round(r['GRAND TOTAL COST']*1.2, 2) for r in results}},
         ]
 
-        # --- 6. FINAL BUFFER & DOWNLOAD ---
         out = BytesIO()
         with pd.ExcelWriter(out, engine='openpyxl') as writer:
             pd.DataFrame(results).to_excel(writer, sheet_name="Summary", index=False)
             pd.DataFrame(v_report).to_excel(writer, sheet_name="Executive_Financial_Report", index=False)
-            for sn, df_s in excel_sheets.items():
-                df_s.to_excel(writer, sheet_name=sn[:31], index=False)
-        
-        st.success(f"✅ Готово для {region_choice}")
-        st.download_button("📥 Скачать результат", out.getvalue(), file_name=f"Report_{region_choice}_{month_choice}.xlsx")
+            for sn, df_s in excel_sheets.items(): df_s.to_excel(writer, sheet_name=sn[:31], index=False)
+        st.success("✅ Сравнение 13 модулей готово")
+        st.download_button("📥 Скачать результат", out.getvalue(), file_name=f"Comparison_13_Modules_{month_choice}.xlsx")
