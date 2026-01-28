@@ -298,8 +298,8 @@ if u_input:
             excel_sheets[f"{m}_Schedule"] = df_sch
 
         # --- EXECUTIVE REPORT ---
-        v_cols = [r['Setup'] for r in results]
-        v_report = [
+    v_cols = [r['Setup'] for r in results]
+    v_report = [
             {"": "Потребление", **{c: "" for c in v_cols}},
             {"": "Объем потребления, кВт×ч", **{r['Setup']: r['Total Monthly kWh'] for r in results}},
             {"": "Генераторная мощность, кВт", **{r['Setup']: r['Generating Peak (kW)'] for r in results}},
