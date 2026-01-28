@@ -240,10 +240,18 @@ if u_input:
                 if d in price_map:
                     sim_en_c += sum(row[HR_COLS[h]] * (price_map[d][price_cols[h]]/1000) for h in range(24))
             
+# --- 4. CALCULATE SUMMARY ---
+            # ... [keep your existing sim_kwh, sim_net_p, etc. calculations] ...
+
             total_c = round(sim_en_c + (sim_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((sim_net_p/1000)*NETWORK_RATE_MWH), 2)
             
+            # UNIQUE LABELING FIX:
+            # If it's the experiment, add "LevelingOnly" to the name so it doesn't overwrite standard 13
+            display_name = f"{m}_Modules" + ("_LevelingOnly" if is_no_gen_experiment else "")
+            setup_label = f"{display_name} {round(cap_limit,1)}kWh"
+            
             results.append({
-                "Setup": f"{m}_Modules {round(cap_limit,1)}kWh", 
+                "Setup": setup_label, 
                 "Total Monthly kWh": round(sim_kwh, 2), 
                 "Generating Peak (kW)": round(sim_gen_p, 4), 
                 "Avg Assessment Peak (MW)": round(sim_net_p/1000, 4), 
@@ -252,7 +260,10 @@ if u_input:
                 "Total Consumption Cost": round(sim_en_c, 2), 
                 "GRAND TOTAL COST": total_c
             })
-            excel_sheets[f"{m}_Modules_Load"] = df_sim; excel_sheets[f"{m}_Schedule"] = df_sch
+            
+            # Use display_name for sheet names to avoid Excel naming errors
+            excel_sheets[f"{display_name}_Load"] = df_sim
+            excel_sheets[f"{display_name}_Schedule"] = df_sch
 
         # Executive report and export (unchanged logic)
         v_cols = [r['Setup'] for r in results]
