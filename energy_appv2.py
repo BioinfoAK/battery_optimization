@@ -61,24 +61,28 @@ def optimize_discharge_aggressive(row_data, target_map, capacity, active_window)
     window_indices = [h for h in active_window if row_data[h] > 0]
     if not window_indices: return discharge
 
-    # Priority 1: Target (Generating) Hours
+    # 1. Target Generating Hours
     for h in window_indices:
         if target_map.get(h, False):
             val = min(row_data[h], rem)
             discharge[h] += val
             rem -= val
 
-    # Priority 2: General Peak Shaving in Assessment Window
+    # 2. General Shaving in assessment window
     while rem > 0.0001:
         current_net = [row_data[h] - discharge[h] for h in range(24)]
         loads_in_window = {h: current_net[h] for h in window_indices if current_net[h] > 0.0001}
         if not loads_in_window: break
+        
         max_val = max(loads_in_window.values())
         peak_hours = [h for h, val in loads_in_window.items() if val >= max_val - 0.0001]
+        
         remaining_loads = sorted(list(set(loads_in_window.values())), reverse=True)
         next_val = remaining_loads[1] if len(remaining_loads) > 1 else 0
+        
         target_shave_depth = max_val - next_val
         total_energy_needed = target_shave_depth * len(peak_hours)
+        
         if rem >= total_energy_needed:
             for h in peak_hours: discharge[h] += target_shave_depth
             rem -= total_energy_needed
@@ -108,14 +112,13 @@ if u_input:
     df_raw.iloc[:, 0] = pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True)
     df_raw[HR_COLS] = df_raw[HR_COLS].astype(float)
     
-# STRICT FILE-BASED HOURS (No backup)
+    # Load Assessment Hours
     df_h = pd.read_excel(f"reference_data/{REGION_PATH}/hours/assessment_hours.xlsx")
     raw_h = df_h[month_choice].dropna().tolist()
     ALL_ASSESS = sorted([int(str(h).split(':')[0]) if ':' in str(h) else int(float(h)) for h in raw_h])
 
-    # Dynamic Charging Windows: Anywhere NOT in the assessment list
-    all_possible_hrs = set(range(24))
-    charge_windows = sorted(list(all_possible_hrs - set(ALL_ASSESS)))
+    # Dynamic Charging Windows (Anything not in Assessment)
+    charge_windows = sorted(list(set(range(24)) - set(ALL_ASSESS)))
 
     df_p = pd.read_excel(f"reference_data/{REGION_PATH}/tariffs/hourly_tariffs_{month_choice.lower()}.xlsx")
     price_map = df_p.set_index(df_p.columns[0]).to_dict('index')
@@ -162,7 +165,7 @@ if u_input:
             is_no_gen = (config == "13_NoGen")
             m = 13 if is_no_gen else config
             cap_limit = m * MODULE_KWH
-            max_chg_pwr = cap_limit * 0.5
+            max_chg_pwr = cap_limit * 0.5 
             
             df_sim = df_raw.copy()
             df_sch = df_raw.copy()
@@ -173,30 +176,18 @@ if u_input:
                 day_d = row.iloc[0].day
                 if day_d not in price_map: continue
                 
-                # Experiment Logic: Empty mask if we are disregarding gen hours
-                active_green_mask = {} if is_no_gen else green_masks[i]
+                # Logic: No more split cycles. Single discharge, single refill.
+                mask = {} if is_no_gen else green_masks[i]
                 
-                # Morning Cycle
-                current_rem = cap_limit
-                morn_d = optimize_discharge_aggressive(row[HR_COLS].values, active_green_mask, current_rem, morn_assess)
-                current_rem -= sum(morn_d)
-                chg_gap = distribute_charge(sum(morn_d) * LOSS_FACTOR, gap_charge_win, price_map, day_d, price_cols, max_chg_pwr)
-                
-                # Evening Cycle
-                current_rem = min(current_rem + (sum(chg_gap)/LOSS_FACTOR), cap_limit)
-                load_ev = row[HR_COLS].values - morn_d + chg_gap
-                eve_d = optimize_discharge_aggressive(load_ev, active_green_mask, current_rem, eve_assess)
-                chg_night = distribute_charge(sum(eve_d) * LOSS_FACTOR, night_charge_win, price_map, day_d, price_cols, max_chg_pwr)
+                final_d = optimize_discharge_aggressive(row[HR_COLS].values, mask, cap_limit, ALL_ASSESS)
+                final_c = distribute_charge(sum(final_d) * LOSS_FACTOR, charge_windows, price_map, day_d, price_cols, max_chg_pwr)
 
-                final_d = morn_d + eve_d
-                final_c = chg_gap + chg_night
                 for h in range(24):
-                    # Accounting for usage: net grid consumption = (load - discharge + charge)
                     net = max(0, row[HR_COLS[h]] - final_d[h] + final_c[h])
                     df_sim.at[i, HR_COLS[h]] = net
                     df_sch.at[i, HR_COLS[h]] = final_d[h] - final_c[h]
 
-            # Results Compilation
+            # Summary Metrics
             sim_kwh = df_sim[HR_COLS].sum().sum()
             sim_net_p = df_sim[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
             sim_gen_peaks = [df_sim.loc[idx, [HR_COLS[h] for h, a in green_masks[idx].items() if a]].max() for idx in df_sim.index[biz_mask]]
@@ -214,7 +205,7 @@ if u_input:
             excel_sheets[f"{label}_Load"] = df_sim
             excel_sheets[f"{label}_Sched"] = df_sch
 
-        # --- 5. EXECUTIVE REPORT ---
+        # --- EXECUTIVE REPORT ---
         v_cols = [r['Setup'] for r in results]
         v_report = [
             {"": "Потребление", **{c: "" for c in v_cols}},
@@ -235,7 +226,6 @@ if u_input:
             {"": "Стоимость с НДС 20%, руб", **{r['Setup']: round(r['GRAND TOTAL COST']*1.2, 2) for r in results}}
         ]
 
-        # --- 6. FINAL BUFFER & DOWNLOAD ---
         out = BytesIO()
         with pd.ExcelWriter(out, engine='openpyxl') as writer:
             pd.DataFrame(results).to_excel(writer, sheet_name="Summary", index=False)
@@ -243,5 +233,5 @@ if u_input:
             for sn, df_s in excel_sheets.items():
                 df_s.to_excel(writer, sheet_name=sn[:31], index=False)
         
-        st.success(f"✅ Готово для {region_choice}")
-        st.download_button("📥 Скачать результат", out.getvalue(), file_name=f"Report_{region_choice}_{month_choice}.xlsx")
+        st.success(f"✅ Готово!")
+        st.download_button("📥 Скачать результат", out.getvalue(), file_name=f"Report_{region_choice}.xlsx")
