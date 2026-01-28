@@ -61,14 +61,12 @@ def optimize_discharge_aggressive(row_data, target_map, capacity, active_window)
     window_indices = [h for h in active_window if row_data[h] > 0]
     if not window_indices: return discharge
 
-    # 1. Target Generating Hours
     for h in window_indices:
         if target_map.get(h, False):
             val = min(row_data[h], rem)
             discharge[h] += val
             rem -= val
 
-    # 2. General Shaving in assessment window
     while rem > 0.0001:
         current_net = [row_data[h] - discharge[h] for h in range(24)]
         loads_in_window = {h: current_net[h] for h in window_indices if current_net[h] > 0.0001}
@@ -76,7 +74,6 @@ def optimize_discharge_aggressive(row_data, target_map, capacity, active_window)
         
         max_val = max(loads_in_window.values())
         peak_hours = [h for h, val in loads_in_window.items() if val >= max_val - 0.0001]
-        
         remaining_loads = sorted(list(set(loads_in_window.values())), reverse=True)
         next_val = remaining_loads[1] if len(remaining_loads) > 1 else 0
         
@@ -108,16 +105,16 @@ def distribute_charge(amount_to_refill, charge_window, price_map, day, price_col
 u_input = st.file_uploader("Загрузить файл потребления (xlsx)", type=["xlsx"])
 
 if u_input:
+    # Extract filename for the naming convention
+    base_filename = Path(u_input.name).stem
+    
     df_raw = pd.read_excel(u_input)
     df_raw.iloc[:, 0] = pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True)
     df_raw[HR_COLS] = df_raw[HR_COLS].astype(float)
     
-    # Load Assessment Hours
     df_h = pd.read_excel(f"reference_data/{REGION_PATH}/hours/assessment_hours.xlsx")
     raw_h = df_h[month_choice].dropna().tolist()
     ALL_ASSESS = sorted([int(str(h).split(':')[0]) if ':' in str(h) else int(float(h)) for h in raw_h])
-
-    # Dynamic Charging Windows (Anything not in Assessment)
     charge_windows = sorted(list(set(range(24)) - set(ALL_ASSESS)))
 
     df_p = pd.read_excel(f"reference_data/{REGION_PATH}/tariffs/hourly_tariffs_{month_choice.lower()}.xlsx")
@@ -140,7 +137,7 @@ if u_input:
             green_masks.append(h_m)
 
         results = []
-        excel_sheets = {"Baseline": df_raw}
+        excel_sheets = {}
 
         # --- FACT (BASELINE) ---
         base_kwh = df_raw[HR_COLS].sum().sum()
@@ -176,9 +173,7 @@ if u_input:
                 day_d = row.iloc[0].day
                 if day_d not in price_map: continue
                 
-                # Logic: No more split cycles. Single discharge, single refill.
                 mask = {} if is_no_gen else green_masks[i]
-                
                 final_d = optimize_discharge_aggressive(row[HR_COLS].values, mask, cap_limit, ALL_ASSESS)
                 final_c = distribute_charge(sum(final_d) * LOSS_FACTOR, charge_windows, price_map, day_d, price_cols, max_chg_pwr)
 
@@ -187,7 +182,6 @@ if u_input:
                     df_sim.at[i, HR_COLS[h]] = net
                     df_sch.at[i, HR_COLS[h]] = final_d[h] - final_c[h]
 
-            # Summary Metrics
             sim_kwh = df_sim[HR_COLS].sum().sum()
             sim_net_p = df_sim[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
             sim_gen_peaks = [df_sim.loc[idx, [HR_COLS[h] for h, a in green_masks[idx].items() if a]].max() for idx in df_sim.index[biz_mask]]
@@ -195,15 +189,14 @@ if u_input:
             sim_en_c = sum(row[HR_COLS[h]] * (price_map[row.iloc[0].day][price_cols[h]]/1000) for _, row in df_sim.iterrows() if row.iloc[0].day in price_map for h in range(24))
 
             label = f"{m}_Modules" + ("_LevelingOnly" if is_no_gen else "")
-            setup_name = f"{label} {round(cap_limit,1)}kWh"
             results.append({
-                "Setup": setup_name, "Total Monthly kWh": round(sim_kwh, 2), "Generating Peak (kW)": round(sim_gen_p, 4),
+                "Setup": label, "Total Monthly kWh": round(sim_kwh, 2), "Generating Peak (kW)": round(sim_gen_p, 4),
                 "Avg Assessment Peak (MW)": round(sim_net_p/1000, 4), "Generating cost": round(sim_gen_p*KW_TO_MWH*TOTAL_RATE_MWH, 2),
                 "Max network charge": round((sim_net_p/1000)*NETWORK_RATE_MWH, 2), "Total Consumption Cost": round(sim_en_c, 2),
                 "GRAND TOTAL COST": round(sim_en_c + (sim_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((sim_net_p/1000)*NETWORK_RATE_MWH), 2)
             })
             excel_sheets[f"{label}_Load"] = df_sim
-            excel_sheets[f"{label}_Sched"] = df_sch
+            excel_sheets[f"{label}_Schedule"] = df_sch
 
         # --- EXECUTIVE REPORT ---
         v_cols = [r['Setup'] for r in results]
@@ -234,4 +227,6 @@ if u_input:
                 df_s.to_excel(writer, sheet_name=sn[:31], index=False)
         
         st.success(f"✅ Готово!")
-        st.download_button("📥 Скачать результат", out.getvalue(), file_name=f"Report_{region_choice}.xlsx")
+        # Naming system: filename_Area_Month.xlsx
+        final_filename = f"{base_filename}_{region_choice}_{month_choice}.xlsx"
+        st.download_button("📥 Скачать результат", out.getvalue(), file_name=final_filename)
