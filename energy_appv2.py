@@ -244,16 +244,21 @@ if u_input:
                 # Final Night Charge
                 spent_e = sum(eve_d)
                 charge_night = distribute_charge(spent_e * LOSS_FACTOR, night_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
+                # --- 3. APPLY TO DATAFRAMES ---
                 final_discharge = morn_d + eve_d
                 final_charge = charge_gap + charge_night
                 
                 for h in range(24):
-                    # Net consumption = Base + Charge - Discharge
+                    # Net consumption = Base Load - Discharge + Charge
                     net_val = max(0, row[HR_COLS[h]] - final_discharge[h] + final_charge[h])
-                    df_sim.at[i, HR_COLS[h]] = round(net_val, 4)
-                    # Schedule = Discharge (pos) and Charge (neg)
-                    df_sch.at[i, HR_COLS[h]] = round(final_discharge[h] - final_charge[h], 4)# ... (apply final_discharge and final_charge to dataframes) ...
-        
+                    
+                    # Use .at with the specific index label from the row
+                    row_idx = df_sim.index[i] 
+                    
+                    df_sim.at[row_idx, HR_COLS[h]] = round(net_val, 4)
+                    # Schedule: Battery gives (pos), Battery takes (neg)
+                    df_sch.at[row_idx, HR_COLS[h]] = round(final_discharge[h] - final_charge[h], 4)
+                    
             df_sch['Выдано батареей (кВтч)'] = df_sch[HR_COLS].apply(lambda x: x[x > 0].sum(), axis=1)
             df_sch['Заряжено (кВтч)'] = df_sch[HR_COLS].apply(lambda x: x[x < 0].sum(), axis=1)
             df_sch['Потери (кВтч)'] = df_sch['Заряжено (кВтч)'] + df_sch['Выдано батареей (кВтч)']
