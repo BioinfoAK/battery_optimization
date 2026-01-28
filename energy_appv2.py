@@ -217,8 +217,8 @@ if u_input:
                     )
                     eve_d += e_leveling
                 # --- 3. DATA PERSISTENCE ---
-                final_discharge = morn_d + eve_d
-                final_charge = charge_gap + charge_night
+                    final_discharge = morn_d + eve_d
+                    final_charge = charge_gap + charge_night
                 
                 for h in range(24):
                     net_val = max(0, row[HR_COLS[h]] - final_discharge[h] + final_charge[h])
