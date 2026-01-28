@@ -123,12 +123,15 @@ if u_input:
     df_p = pd.read_excel(f"reference_data/{REGION_PATH}/tariffs/hourly_tariffs_{month_choice.lower()}.xlsx")
     price_map = df_p.set_index(df_p.columns[0]).to_dict('index')
     price_cols = df_p.columns[1:]
+# ... [UI and Sidebar code remains the same] ...
 
     if st.button("🚀 Начать расчет"):
         biz_mask = df_raw.iloc[:, 0].apply(is_biz_day)
         
+        # Load generating hours
         df_ref = pd.read_excel(f"reference_data/{REGION_PATH}/hours/generating_hours_{month_choice.lower()}.xlsx")
         df_ref.iloc[:, 0] = pd.to_datetime(df_ref.iloc[:, 0], dayfirst=True).dt.date
+        
         green_masks = []
         for _, row in df_raw.iterrows():
             d = row.iloc[0].date()
@@ -142,9 +145,20 @@ if u_input:
         results = []
         excel_sheets = {"Baseline": df_raw}
 
-        for m in [5, 6, 7, 8]:
+        # --- DYNAMIC CONFIGURATION ---
+        # Only Kaliningrad gets the 13-module experiment branch
+        test_configs = [5, 6, 7, 8]
+        if region_choice == "Kaliningrad":
+            test_configs += [13, "13_NoGen"]
+
+        for config in test_configs:
+            is_no_gen_experiment = (config == "13_NoGen")
+            m = 13 if is_no_gen_experiment else config
+            
+            # Constraints: 14.6 kWh per module, 50% power-to-energy ratio
             cap_limit = m * MODULE_KWH 
             max_chg_pwr = cap_limit * 0.5
+            
             df_sim = df_raw.copy()
             df_sch = df_raw.copy()
             df_sch[HR_COLS] = 0.0 
@@ -158,38 +172,39 @@ if u_input:
                 current_rem_cap = cap_limit
                 morn_d = np.zeros(24)
                 
-                for h in morn_assess:
-                    if green_masks[i].get(h, False):
-                        val = min(row[HR_COLS[h]], current_rem_cap)
-                        morn_d[h] = val
-                        current_rem_cap -= val 
+                # Use current approach (Green Hours first) UNLESS it's the NoGen experiment
+                active_green_mask = {} if is_no_gen_experiment else green_masks[i]
                 
-                if current_rem_cap > 0:
-                    m_leveling = optimize_discharge_aggressive(row[HR_COLS].values - morn_d, {}, current_rem_cap, morn_assess)
-                    morn_d += m_leveling
-                    current_rem_cap -= sum(m_leveling)
+                # Morning Leveling + Priority Green Hours
+                morn_d = optimize_discharge_aggressive(
+                    row[HR_COLS].values, 
+                    active_green_mask, 
+                    current_rem_cap, 
+                    morn_assess
+                )
+                current_rem_cap -= sum(morn_d)
                 
+                # Refill during midday gap (Losses: 10% more energy needed to charge)
                 spent_m = sum(morn_d)
                 charge_gap = distribute_charge(spent_m * LOSS_FACTOR, gap_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
 
                 # --- 2. EVENING CYCLE ---
+                # Capacity recovery is what we actually managed to charge divided by loss factor
                 actual_stored_midday = sum(charge_gap) / LOSS_FACTOR
                 current_rem_cap = min(current_rem_cap + actual_stored_midday, cap_limit)
                 
-                eve_d = np.zeros(24)
                 load_after_morn = row[HR_COLS].values - morn_d + charge_gap
                 
-                for h in eve_assess:
-                    if green_masks[i].get(h, False):
-                        val = min(load_after_morn[h], current_rem_cap)
-                        eve_d[h] = val
-                        current_rem_cap -= val 
+                # Evening Leveling + Priority Green Hours
+                eve_d = optimize_discharge_aggressive(
+                    load_after_morn, 
+                    active_green_mask, 
+                    current_rem_cap, 
+                    eve_assess
+                )
+                current_rem_cap -= sum(eve_d)
                 
-                if current_rem_cap > 0:
-                    e_leveling = optimize_discharge_aggressive(load_after_morn - eve_d, {}, current_rem_cap, eve_assess)
-                    eve_d += e_leveling
-                    current_rem_cap -= sum(e_leveling)
-                
+                # Night Refill
                 spent_e = sum(eve_d)
                 charge_night = distribute_charge(spent_e * LOSS_FACTOR, night_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
 
@@ -198,9 +213,12 @@ if u_input:
                 final_charge = charge_gap + charge_night
                 
                 for h in range(24):
+                    # Battery usage: net_val cannot be negative (clamped at 0)
                     net_val = max(0, row[HR_COLS[h]] - final_discharge[h] + final_charge[h])
                     df_sim.at[i, HR_COLS[h]] = round(net_val, 4)
                     df_sch.at[i, HR_COLS[h]] = round(final_discharge[h] - final_charge[h], 4)
+            
+            # ... [Summary and Reporting code remains same] ...
             
             # --- 4. CALCULATE SUMMARY ---
             df_sch['Выдано батареей (кВтч)'] = df_sch[HR_COLS].apply(lambda x: round(x[x > 0].sum(), 4), axis=1)
