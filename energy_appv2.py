@@ -5,9 +5,9 @@ import holidays
 from io import BytesIO
 from pathlib import Path
 
-# --- 1. CONFIG & UI ---
+# --- 1. UI & ACCESS ---
 st.set_page_config(page_title="Расчет оптимального потребления", layout="wide")
-st.title("🔋 Расчет оптимального потребления: СТРОГИЙ КОНТРОЛЬ ПОТЕРЬ")
+st.title("🔋 Расчет оптимального потребления")
 
 def check_password():
     if "password_correct" not in st.session_state:
@@ -23,7 +23,7 @@ def password_entered():
 
 if not check_password(): st.stop()
 
-# --- 2. SIDEBAR ---
+# --- 2. CONFIG ---
 region_choice = st.sidebar.radio("Регион:", ["Samara", "Ulyanovsk", "Kaliningrad"])
 month_choice = st.sidebar.selectbox("Месяц:", ["jan25", "feb25", "mar25", "apr25", "may25", "jun25", "jul25", "aug25", "sep25", "oct25", "nov25", "dec25", "jan26"])
 
@@ -33,29 +33,23 @@ try:
     match = df_reg_config[df_reg_config['month'].astype(str).str.lower() == month_choice.lower()]
     default_gen, default_admin, default_net = match.iloc[0][['Генераторная (покупная) мощность', 'Ставка за управление', 'Ставка за содержание сетей']]
 except Exception as e:
-    st.error(f"Ошибка загрузки regional_config: {e}"); st.stop()
+    st.error(f"Ошибка в regional_config.xlsx: {e}"); st.stop()
 
-gen_pwr = st.sidebar.number_input("Генераторная мощность", value=float(default_gen))
-gen_adm = st.sidebar.number_input("Ставка за управление", value=float(default_admin))
-net_rate = st.sidebar.number_input("Ставка за содержание сетей", value=float(default_net))
-
-TOTAL_RATE_MWH = gen_pwr + gen_adm
-NETWORK_RATE_MWH = net_rate
+TOTAL_RATE_MWH = float(default_gen) + float(default_admin)
+NETWORK_RATE_MWH = float(default_net)
 KW_TO_MWH = 1 / 1000
 MODULE_KWH = 14.6
-LOSS_FACTOR = 1.10 # 10% Efficiency Loss
+LOSS_FACTOR = 1.10 
 HR_COLS = [f"{h}.00-{h+1}.00" for h in range(24)]
 
 def is_biz_day(dt):
     if dt.month == 11 and dt.day == 1: return True
     return not (dt.weekday() >= 5 or dt in holidays.Russia(years=[dt.year]))
 
-# --- 3. CORE LOGIC ---
 def distribute_charge(amount_to_refill, charge_window, price_map, day, price_cols, max_pwr):
     charge_profile = np.zeros(24)
     rem_to_charge = amount_to_refill
     if not charge_window: return charge_profile
-    # Sort hours by price to charge at cheapest times
     sorted_hrs = sorted(charge_window, key=lambda h: price_map[day][price_cols[h]])
     for h in sorted_hrs:
         if rem_to_charge <= 0: break
@@ -69,15 +63,11 @@ def optimize_discharge_aggressive(row_data, target_map, capacity, active_window)
     rem = capacity
     window_indices = [h for h in active_window if row_data[h] > 0]
     if not window_indices: return discharge
-
-    # 1. Hit Generating Hours first
     for h in window_indices:
         if target_map.get(h, False):
             val = min(row_data[h], rem)
             discharge[h] += val
             rem -= val
-
-    # 2. Level the rest of the peaks in the window
     while rem > 0.0001:
         current_net = [row_data[h] - discharge[h] for h in range(24)]
         loads_in_window = {h: current_net[h] for h in window_indices if current_net[h] > 0.0001}
@@ -97,7 +87,7 @@ def optimize_discharge_aggressive(row_data, target_map, capacity, active_window)
             rem = 0
     return discharge
 
-# --- 4. EXECUTION ---
+# --- 3. EXECUTION ---
 u_input = st.file_uploader("Загрузить файл потребления", type=["xlsx"])
 if u_input:
     orig_name = Path(u_input.name).stem
@@ -105,11 +95,14 @@ if u_input:
     df_raw.iloc[:, 0] = pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True)
     df_raw[HR_COLS] = df_raw[HR_COLS].astype(float)
     
+    # Strict Assessment Hours reading
     try:
         df_h = pd.read_excel(f"reference_data/{REGION_PATH}/hours/assessment_hours.xlsx")
         raw_h = df_h[month_choice].dropna().tolist()
         ALL_ASSESS = sorted([int(str(h).split(':')[0]) if ':' in str(h) else int(float(h)) for h in raw_h])
-    except: st.error("Ошибка в assessment_hours.xlsx"); st.stop()
+        if not ALL_ASSESS: raise ValueError("Hours file is empty")
+    except Exception as e:
+        st.error(f"Ошибка в assessment_hours.xlsx: {e}"); st.stop()
 
     gaps = [ALL_ASSESS[i+1] - ALL_ASSESS[i] for i in range(len(ALL_ASSESS)-1)]
     split_idx = gaps.index(max(gaps)) + 1 if gaps else 0
@@ -130,14 +123,30 @@ if u_input:
         for _, row in df_raw.iterrows():
             d = row.iloc[0].date()
             match = df_ref[df_ref.iloc[:, 0] == d]
-            h_m = {h: False for h in range(24)}; 
-            if not match.empty: 
+            h_m = {h: False for h in range(24)}
+            if not match.empty:
                 idx = int(match.iloc[0, 1]) - 1
                 if 0 <= idx <= 23: h_m[idx] = True
             green_masks.append(h_m)
 
         results = []
-        excel_sheets = {"Baseline": df_raw}
+        excel_sheets = {}
+
+        # --- 4. BASELINE (ФАКТ) CALCULATION ---
+        base_kwh = df_raw[HR_COLS].sum().sum()
+        base_net_p = df_raw[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
+        base_gen_peaks = [df_raw.loc[i, [HR_COLS[h] for h, a in green_masks[i].items() if a]].max() for i in range(len(df_raw)) if biz_mask[i]]
+        base_gen_p = np.mean([p for p in base_gen_peaks if not np.isnan(p)]) if base_gen_peaks else 0
+        base_en_c = sum(row[HR_COLS[h]] * (price_map[row.iloc[0].day][price_cols[h]]/1000) for i, row in df_raw.iterrows() if row.iloc[0].day in price_map for h in range(24))
+
+        results.append({
+            "Setup": "ФАКТ", "Total Monthly kWh": round(base_kwh, 2), "Generating Peak (kW)": round(base_gen_p, 4),
+            "Avg Assessment Peak (MW)": round(base_net_p/1000, 4), "Generating cost": round(base_gen_p*KW_TO_MWH*TOTAL_RATE_MWH, 2),
+            "Max network charge": round((base_net_p/1000)*NETWORK_RATE_MWH, 2), "Total Consumption Cost": round(base_en_c, 2),
+            "GRAND TOTAL COST": round(base_en_c + (base_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((base_net_p/1000)*NETWORK_RATE_MWH), 2)
+        })
+
+        # --- 5. CONFIGURATIONS ---
         configs = [5, 6, 7, 8]
         if region_choice == "Kaliningrad": configs += [13, "13_NoGen"]
 
@@ -145,7 +154,7 @@ if u_input:
             is_no_gen = (config == "13_NoGen")
             m = 13 if is_no_gen else config
             cap_limit = m * MODULE_KWH
-            max_chg_pwr = cap_limit * 0.5 # 2-hour full charge capability
+            max_chg_pwr = cap_limit * 0.5 
             
             df_sim = df_raw.copy(); df_sch = df_raw.copy(); df_sch[HR_COLS] = 0.0
 
@@ -154,24 +163,19 @@ if u_input:
                 day_d = row.iloc[0].day
                 if day_d not in price_map: continue
                 
-                # --- Morning ---
-                current_rem_cap = cap_limit
+                # Split-Cycle Math
                 active_mask = {} if is_no_gen else green_masks[i]
-                morn_d = optimize_discharge_aggressive(row[HR_COLS].values, active_mask, current_rem_cap, morn_assess)
                 
-                # Refill strictly based on Discharge * 1.10
+                # Morning Cycle
+                morn_d = optimize_discharge_aggressive(row[HR_COLS].values, active_mask, cap_limit, morn_assess)
                 charge_gap = distribute_charge(sum(morn_d) * LOSS_FACTOR, gap_charge_win, price_map, day_d, price_cols, max_chg_pwr)
-
-                # --- Evening ---
-                # Capacity available for evening is what was left + what we recharged in the gap
+                
+                # Evening Cycle (Refill what we used + what we can fit)
                 stored_from_gap = sum(charge_gap) / LOSS_FACTOR
-                rem_after_morn = cap_limit - sum(morn_d)
-                available_for_eve = min(rem_after_morn + stored_from_gap, cap_limit)
+                available_for_eve = min((cap_limit - sum(morn_d)) + stored_from_gap, cap_limit)
                 
                 load_after_morn = row[HR_COLS].values - morn_d + charge_gap
                 eve_d = optimize_discharge_aggressive(load_after_morn, active_mask, available_for_eve, eve_assess)
-                
-                # Refill strictly based on Discharge * 1.10
                 charge_night = distribute_charge(sum(eve_d) * LOSS_FACTOR, night_charge_win, price_map, day_d, price_cols, max_chg_pwr)
 
                 final_discharge = morn_d + eve_d
@@ -180,13 +184,12 @@ if u_input:
                     df_sim.at[i, HR_COLS[h]] = round(max(0, row[HR_COLS[h]] - final_discharge[h] + final_charge[h]), 4)
                     df_sch.at[i, HR_COLS[h]] = round(final_discharge[h] - final_charge[h], 4)
 
-            # --- MATH CORRECTION FOR REPORTING ---
+            # Schedule Summary Bits
             df_sch['Выдано батареей (кВтч)'] = df_sch[HR_COLS].apply(lambda x: round(x[x > 0].sum(), 4), axis=1)
             df_sch['Заряжено (кВтч)'] = df_sch[HR_COLS].apply(lambda x: round(abs(x[x < 0].sum()), 4), axis=1)
-            # Efficiency Loss is 10% of the Discharge
             df_sch['Потери (кВтч)'] = round(df_sch['Заряжено (кВтч)'] - df_sch['Выдано батареей (кВтч)'], 4)
 
-            # Performance Metrics
+            # Metrics
             sim_kwh = df_sim[HR_COLS].sum().sum()
             sim_net_p = df_sim[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
             sim_gen_peaks = [df_sim.loc[idx, [HR_COLS[h] for h, a in green_masks[idx].items() if a]].max() for idx in df_sim.index[biz_mask]]
@@ -202,7 +205,7 @@ if u_input:
             })
             excel_sheets[f"{label}_Load"] = df_sim; excel_sheets[f"{label}_Schedule"] = df_sch
 
-        # Financial Report
+        # --- 6. EXECUTIVE REPORT (RESTORED) ---
         v_cols = [r['Setup'] for r in results]
         v_report = [
             {"": "Потребление", **{c: "" for c in v_cols}},
@@ -222,6 +225,8 @@ if u_input:
             {"": "Стоимость без НДС 20%, руб", **{r['Setup']: r['GRAND TOTAL COST'] for r in results}},
             {"": "Стоимость с НДС 20%, руб", **{r['Setup']: round(r['GRAND TOTAL COST']*1.2, 2) for r in results}}
         ]
+
+        # EXPORT
         final_fn = f"{orig_name}_{region_choice}_{month_choice}.xlsx"
         out = BytesIO()
         with pd.ExcelWriter(out, engine='openpyxl') as writer:
@@ -229,5 +234,6 @@ if u_input:
             pd.DataFrame(v_report).to_excel(writer, sheet_name="Executive_Financial_Report", index=False)
             for sn, df_s in excel_sheets.items(): df_s.to_excel(writer, sheet_name=sn[:31], index=False)
         
-        st.success(f"✅ Готово: {orig_name}_{region_choice}_{month_choice}.xlsx")
-        st.download_button("📥 Скачать результат", out.getvalue(), file_name=f"{orig_name}_{region_choice}_{month_choice}.xlsx")
+        st.success(f"✅ Расчет завершен: {final_fn}")
+        st.download_button("📥 Скачать результат", out.getvalue(), file_name=final_fn)
+
