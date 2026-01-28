@@ -266,7 +266,10 @@ if u_input:
             excel_sheets[f"{display_name}_Schedule"] = df_sch
 
         # Executive report and export (unchanged logic)
-        v_cols = [r['Setup'] for r in results]
+# --- EXECUTIVE REPORT ---
+        # 1. Ensure "ФАКТ" is included in the columns list
+        v_cols = [r['Setup'] for r in results] 
+        
         v_report = [
             {"": "Потребление", **{c: "" for c in v_cols}},
             {"": "Объем потребления, кВт×ч", **{r['Setup']: r['Total Monthly kWh'] for r in results}},
@@ -274,7 +277,7 @@ if u_input:
             {"": "Сетевая мощность, кВт", **{r['Setup']: round(r['Avg Assessment Peak (MW)']*1000, 2) for r in results}},
             {"": "", **{c: "" for c in v_cols}},
             {"": "Тарифы", **{c: "" for c in v_cols}},
-            {"": "Средняя стоимость электроэнергии, руб/кВтч", **{r['Setup']: round(r['Total Consumption Cost']/r['Total Monthly kWh'], 2) if r['Total Monthly kWh'] > 0 else 0 for r in results}},
+            {"": "Средняя стоимость электроэнергии, руб/кВтч", **{r['Setup']: (round(r['Total Consumption Cost']/r['Total Monthly kWh'], 2) if r['Total Monthly kWh'] > 0 else 0) for r in results}},
             {"": "Генераторная мощность, руб/МВт", **{c: round(TOTAL_RATE_MWH, 2) for c in v_cols}},
             {"": "Ставка за содержание сетей, руб/МВт", **{c: round(NETWORK_RATE_MWH, 2) for c in v_cols}},
             {"": "", **{c: "" for c in v_cols}},
