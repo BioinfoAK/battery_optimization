@@ -319,12 +319,12 @@ if u_input:
         ]
 
         # --- SAVE & DOWNLOAD ---
-        orig_name = Path(u_input.name).stem
-        final_fn = f"{orig_name}_{region_choice}_{month_choice}.xlsx"
-        out = BytesIO()
-        with pd.ExcelWriter(out, engine='openpyxl') as writer:
-            pd.DataFrame(results).to_excel(writer, sheet_name="Summary", index=False)
-            pd.DataFrame(v_report).to_excel(writer, sheet_name="Executive_Financial_Report", index=False)
-            for sn, df_s in excel_sheets.items(): df_s.to_excel(writer, sheet_name=sn, index=False)
-        st.success(f"✅ Готово: {final_fn}")
-        st.download_button("📥 Скачать результат", out.getvalue(), file_name=final_fn)
+    orig_name = Path(u_input.name).stem
+    final_fn = f"{orig_name}_{region_choice}_{month_choice}.xlsx"
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine='openpyxl') as writer:
+        pd.DataFrame(results).to_excel(writer, sheet_name="Summary", index=False)
+        pd.DataFrame(v_report).to_excel(writer, sheet_name="Executive_Financial_Report", index=False)
+        for sn, df_s in excel_sheets.items(): df_s.to_excel(writer, sheet_name=sn, index=False)
+    st.success(f"✅ Готово: {final_fn}")
+    st.download_button("📥 Скачать результат", out.getvalue(), file_name=final_fn)
