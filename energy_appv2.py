@@ -203,7 +203,7 @@ if u_input:
             excel_sheets[f"{label}_Load"] = df_sim; excel_sheets[f"{label}_Schedule"] = df_sch
 
         # Financial Report
-       v_cols = [r['Setup'] for r in results]
+        v_cols = [r['Setup'] for r in results]
         v_report = [
             {"": "Потребление", **{c: "" for c in v_cols}},
             {"": "Объем потребления, кВт×ч", **{r['Setup']: r['Total Monthly kWh'] for r in results}},
