@@ -166,17 +166,18 @@ if u_input:
                 if day_of_month not in price_map: continue
                 
                 # --- 1. MORNING CYCLE ---
+                # --- 1. MORNING CYCLE ---
                 current_rem_cap = cap_limit
                 morn_d = np.zeros(24)
                 
-                # Priority 1: Zero out Green Hours
+                # Priority 1: Morning Green Hours
                 for h in morn_assess:
                     if green_masks[i].get(h, False):
                         val = min(row[HR_COLS[h]], current_rem_cap)
                         morn_d[h] = val
                         current_rem_cap -= val 
                 
-                # Priority 2: Level remaining morning peaks
+                # Priority 2: Morning Leveling
                 if current_rem_cap > 0:
                     m_leveling = optimize_discharge_aggressive(
                         row[HR_COLS].values - morn_d, 
@@ -185,24 +186,28 @@ if u_input:
                         morn_assess
                     )
                     morn_d += m_leveling
+                    current_rem_cap -= sum(m_leveling) # Final morning residual
                 
                 spent_m = sum(morn_d)
+                # Refill during midday gap
                 charge_gap = distribute_charge(spent_m * LOSS_FACTOR, gap_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
 
                 # --- 2. EVENING CYCLE ---
-                # Logic: Resetting capacity for the evening block
-                current_rem_cap = cap_limit 
+                # FIX: Capacity = (What was left) + (What we actually managed to charge)
+                actual_stored_midday = sum(charge_gap) / LOSS_FACTOR
+                current_rem_cap = min(current_rem_cap + actual_stored_midday, cap_limit)
+                
                 eve_d = np.zeros(24)
                 load_after_morn = row[HR_COLS].values - morn_d + charge_gap
                 
-                # Priority 1: Zero out Green Hours
+                # Priority 1: Evening Green Hours (Must happen first)
                 for h in eve_assess:
                     if green_masks[i].get(h, False):
                         val = min(load_after_morn[h], current_rem_cap)
                         eve_d[h] = val
-                        current_rem_cap -= val 
+                        current_rem_cap -= val # Capacity is lowered by Green Hour usage
                 
-                # Priority 2: Level evening peaks
+                # Priority 2: Evening Leveling (Uses remaining capacity)
                 if current_rem_cap > 0:
                     e_leveling = optimize_discharge_aggressive(
                         load_after_morn - eve_d, 
@@ -211,10 +216,6 @@ if u_input:
                         eve_assess
                     )
                     eve_d += e_leveling
-                
-                spent_e = sum(eve_d)
-                charge_night = distribute_charge(spent_e * LOSS_FACTOR, night_charge_win, price_map, day_of_month, price_cols, max_chg_pwr)
-
                 # --- 3. DATA PERSISTENCE ---
                 final_discharge = morn_d + eve_d
                 final_charge = charge_gap + charge_night
