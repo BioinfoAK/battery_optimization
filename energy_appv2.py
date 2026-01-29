@@ -103,7 +103,12 @@ u_input = st.file_uploader("Загрузить файл потребления (
 
 if u_input:
     df_raw = pd.read_excel(u_input)
-    df_raw.iloc[:, 0] = pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True)
+    
+    # --- ROBUST DATE PARSING ---
+    # This prevents the crash you saw with non-Kaliningrad files
+    df_raw.iloc[:, 0] = pd.to_datetime(df_raw.iloc[:, 0], dayfirst=True, errors='coerce')
+    df_raw = df_raw.dropna(subset=[df_raw.columns[0]]) # Remove rows with bad dates
+    
     df_raw[HR_COLS] = df_raw[HR_COLS].astype(float)
     
     try:
@@ -126,7 +131,7 @@ if u_input:
         biz_mask = df_raw.iloc[:, 0].apply(is_biz_day)
         df_ref = pd.read_excel(f"reference_data/{REGION_PATH}/hours/generating_hours_{month_choice.lower()}.xlsx")
         df_ref.iloc[:, 0] = pd.to_datetime(df_ref.iloc[:, 0], dayfirst=True).dt.date
-        
+    
         green_masks = []
         for _, row in df_raw.iterrows():
             d = row.iloc[0].date()
@@ -138,7 +143,7 @@ if u_input:
             green_masks.append(h_m)
 
         results = []; excel_sheets = {"Baseline": df_raw}
-
+        
         # FACT Metrics
         f_kwh = df_raw[HR_COLS].sum().sum()
         f_net_p = df_raw[biz_mask][[HR_COLS[h] for h in ALL_ASSESS]].max(axis=1).mean()
@@ -149,13 +154,30 @@ if u_input:
         results.append({"Setup": "ФАКТ", "kWh": f_kwh, "Gen_kW": f_gen_p, "Net_kW": f_net_p/1000, "Cost_Gen": f_gen_p*KW_TO_MWH*TOTAL_RATE_MWH, "Cost_Net": (f_net_p/1000)*NETWORK_RATE_MWH, "Cost_En": f_en_c, "Total": f_en_c + (f_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((f_net_p/1000)*NETWORK_RATE_MWH)})
 
         # MODULES LOOP
-        module_configs = [5, 6, 7, 8, 13, "13_LevelingOnly"]
+        # --- FIXED MODULES LOOP ---
+        # 1. Define base configs for everyone
+        module_configs = [5, 6, 7, 8]
+        
+        # 2. Add Kaliningrad-specific tests only if needed
+        if region_choice == "Kaliningrad":
+            module_configs.extend([13, "13_LevelingOnly"])
+
         for config in module_configs:
-            m = 13 if isinstance(config, str) else config
-            is_no_gen = (config == "13_LevelingOnly")
+            # Explicitly reset variables for this iteration
+            if isinstance(config, str):
+                m = 13
+                is_no_gen = True
+            else:
+                m = config
+                is_no_gen = False
+            
+            # Recalculate capacity correctly
             cap = m * MODULE_KWH
             max_p = cap * 0.5
             
+            df_sim = df_raw.copy()
+            df_sch = df_raw.copy()
+            df_sch[HR_COLS] = 0.0
             df_sim = df_raw.copy(); df_sch = df_raw.copy(); df_sch[HR_COLS] = 0.0
 
             for i, row in df_raw.iterrows():
@@ -163,9 +185,11 @@ if u_input:
                 mask = {} if is_no_gen else green_masks[i]
                 day_d = row.iloc[0].day
                 
+                # Morning discharge
                 d1 = optimize_discharge_aggressive(row[HR_COLS].values, mask, cap, morn_assess)
                 c_gap = distribute_charge(sum(d1), gap_charge_win, price_map, day_d, price_cols, max_p)
                 
+                # Evening discharge
                 usable_e2 = min(cap, (cap - sum(d1)) + (sum(c_gap)/LOSS_FACTOR))
                 l_after = row[HR_COLS].values - d1 + c_gap
                 d2 = optimize_discharge_aggressive(l_after, mask, usable_e2, eve_assess)
@@ -176,6 +200,7 @@ if u_input:
                     df_sim.at[i, HR_COLS[h]] = max(0, row[HR_COLS[h]] - f_dis[h] + f_chg[h])
                     df_sch.at[i, HR_COLS[h]] = round(f_dis[h] - f_chg[h], 4)
 
+            # --- POST-PROCESSING & SUMMARY COLUMNS ---
             df_sch['Выдано батареей (кВтч)'] = df_sch[HR_COLS].apply(lambda x: x[x > 0].sum(), axis=1)
             df_sch['Заряжено из сети (кВтч)'] = df_sch[HR_COLS].apply(lambda x: abs(x[x < 0].sum()), axis=1)
             df_sch['Потери (кВтч)'] = df_sch['Заряжено из сети (кВтч)'] - df_sch['Выдано батареей (кВтч)']
@@ -187,7 +212,11 @@ if u_input:
             s_en_c = sum(row[HR_COLS[h]] * (price_map[row.iloc[0].day][price_cols[h]]/1000) for _, row in df_sim.iterrows() if row.iloc[0].day in price_map for h in range(24))
             
             label = f"{m}_Modules" + ("_NoGen" if is_no_gen else "")
-            results.append({"Setup": label, "kWh": s_kwh, "Gen_kW": s_gen_p, "Net_kW": s_net_p/1000, "Cost_Gen": s_gen_p*KW_TO_MWH*TOTAL_RATE_MWH, "Cost_Net": (s_net_p/1000)*NETWORK_RATE_MWH, "Cost_En": s_en_c, "Total": s_en_c + (s_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((s_net_p/1000)*NETWORK_RATE_MWH)})
+            results.append({
+                "Setup": label, "kWh": s_kwh, "Gen_kW": s_gen_p, "Net_kW": s_net_p/1000, 
+                "Cost_Gen": s_gen_p*KW_TO_MWH*TOTAL_RATE_MWH, "Cost_Net": (s_net_p/1000)*NETWORK_RATE_MWH, 
+                "Cost_En": s_en_c, "Total": s_en_c + (s_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((s_net_p/1000)*NETWORK_RATE_MWH)
+            })
             excel_sheets[f"{label}_Load"] = df_sim
             excel_sheets[f"{label}_Schedule"] = df_sch
 
