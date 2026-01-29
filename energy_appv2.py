@@ -268,6 +268,6 @@ if u_input:
         with pd.ExcelWriter(out, engine='openpyxl') as writer:
             pd.DataFrame(v_report).to_excel(writer, sheet_name="Financial_Report", index=False)
             for sn, df_s in excel_sheets.items(): df_s.to_excel(writer, sheet_name=sn[:31], index=False)
-        
+        out.seek(0)
         st.success(f"✅ Расчет завершен: {final_fn}")
         st.download_button("📥 Скачать полный отчет", out.getvalue(), file_name=final_fn)
