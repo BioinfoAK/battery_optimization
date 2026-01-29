@@ -225,7 +225,7 @@ if u_input:
         
         v_report = [
             {"": "Потребление", **{c: "" for c in v_cols}},
-            {"": "Объем потребления, кВт×ч", **{r['Setup']: r['Total Monthly kWh'] for r in results}},
+            {"": "Объем потребления, кВт×ч", **{r['Setup']: r['kWh'] for r in results}},
             {"": "Генераторная мощность, кВт", **{r['Setup']: r['Generating Peak (kW)'] for r in results}},
             {"": "Сетевая мощность, кВт", **{r['Setup']: round(r['Avg Assessment Peak (MW)']*1000, 2) for r in results}},
             {"": "", **{c: "" for c in v_cols}},
