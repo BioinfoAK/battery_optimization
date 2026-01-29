@@ -134,8 +134,8 @@ if u_input:
     
         green_masks = []
         for _, row in df_raw.iterrows():
-            d = row.iloc[0].date()
-            match = df_ref[df_ref.iloc[:, 0] == d]
+            d = pd.to_datetime(row.iloc[0]).date()
+            match = df_ref[pd.to_datetime(df_ref.iloc[:, 0]).dt.date == d]
             h_m = {h: False for h in range(24)}
             if not match.empty:
                 h_idx = int(float(match.iloc[0, 1])) - 1
@@ -169,7 +169,9 @@ if u_input:
         # 2. Add Kaliningrad-specific tests only if needed
         if region_choice == "Kaliningrad":
             module_configs.extend([10, "10_LevelingOnly"])
-
+        st.write(f"Total rows in data: {len(df_raw)}")
+        st.write(f"Business days found: {sum(biz_mask)}")
+        st.write(f"Dates found in Price Map: {len(price_map)}")
         for config in module_configs:
             # Explicitly reset variables for this iteration
             if isinstance(config, str):
