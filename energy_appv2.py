@@ -168,12 +168,12 @@ if u_input:
         
         # 2. Add Kaliningrad-specific tests only if needed
         if region_choice == "Kaliningrad":
-            module_configs.extend([13, "13_LevelingOnly"])
+            module_configs.extend([10, "10_LevelingOnly"])
 
         for config in module_configs:
             # Explicitly reset variables for this iteration
             if isinstance(config, str):
-                m = 13
+                m = 10
                 is_no_gen = True
             else:
                 m = config
