@@ -222,17 +222,24 @@ if u_input:
 
         # --- FINAL REPORT ---
         v_cols = [r['Setup'] for r in results]
+        
         v_report = [
-            {"": "Объем потребления, кВт×ч", **{r['Setup']: r['kWh'] for r in results}},
-            {"": "Генераторная мощность, кВт", **{r['Setup']: round(r['Gen_kW'], 2) for r in results}},
-            {"": "Сетевая мощность, кВт", **{r['Setup']: round(r['Net_kW']*1000, 2) for r in results}},
+            {"": "Потребление", **{c: "" for c in v_cols}},
+            {"": "Объем потребления, кВт×ч", **{r['Setup']: r['Total Monthly kWh'] for r in results}},
+            {"": "Генераторная мощность, кВт", **{r['Setup']: r['Generating Peak (kW)'] for r in results}},
+            {"": "Сетевая мощность, кВт", **{r['Setup']: round(r['Avg Assessment Peak (MW)']*1000, 2) for r in results}},
             {"": "", **{c: "" for c in v_cols}},
-            {"": "Средняя стоимость руб/кВтч", **{r['Setup']: round(r['Cost_En']/r['kWh'], 2) if r['kWh'] > 0 else 0 for r in results}},
-            {"": "ИТОГО Энергия, руб", **{r['Setup']: round(r['Cost_En'], 2) for r in results}},
-            {"": "ИТОГО Генераторная, руб", **{r['Setup']: round(r['Cost_Gen'], 2) for r in results}},
-            {"": "ИТОГО Сетевая, руб", **{r['Setup']: round(r['Cost_Net'], 2) for r in results}},
-            {"": "ИТОГО без НДС, руб", **{r['Setup']: round(r['Total'], 2) for r in results}},
-            {"": "ИТОГО с НДС 20%, руб", **{r['Setup']: round(r['Total']*1.2, 2) for r in results}},
+            {"": "Тарифы", **{c: "" for c in v_cols}},
+            {"": "Средняя стоимость электроэнергии, руб/кВтч", **{r['Setup']: round(r['Total Consumption Cost']/r['Total Monthly kWh'], 2) if r['Total Monthly kWh'] > 0 else 0 for r in results}},
+            {"": "Генераторная мощность, руб/МВт", **{c: round(TOTAL_RATE_MWH, 2) for c in v_cols}},
+            {"": "Ставка за содержание сетей, руб/МВт", **{c: round(NETWORK_RATE_MWH, 2) for c in v_cols}},
+            {"": "", **{c: "" for c in v_cols}},
+            {"": "ИТОГО:", **{c: "" for c in v_cols}},
+            {"": "Стоимость электроэнергии, руб", **{r['Setup']: r['Total Consumption Cost'] for r in results}},
+            {"": "Стоимость генераторной, руб", **{r['Setup']: r['Generating cost'] for r in results}},
+            {"": "Стоимость сетевой, руб", **{r['Setup']: r['Max network charge'] for r in results}},
+            {"": "Стоимость без НДС 20%, руб", **{r['Setup']: r['GRAND TOTAL COST'] for r in results}},
+            {"": "Стоимость с НДС 20%, руб", **{r['Setup']: round(r['GRAND TOTAL COST']*1.2, 2) for r in results}}
         ]
 
         # Dynamic Filename Logic
