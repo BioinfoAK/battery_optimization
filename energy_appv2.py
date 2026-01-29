@@ -151,8 +151,16 @@ if u_input:
         f_gen_p = np.mean([p for p in f_gen_peaks if not np.isnan(p)]) if f_gen_peaks else 0
         f_en_c = sum(row[HR_COLS[h]] * (price_map[row.iloc[0].day][price_cols[h]]/1000) for i, row in df_raw.iterrows() if row.iloc[0].day in price_map for h in range(24))
 
-        results.append({"Setup": "ФАКТ", "kWh": f_kwh, "Gen_kW": f_gen_p, "Net_kW": f_net_p/1000, "Cost_Gen": f_gen_p*KW_TO_MWH*TOTAL_RATE_MWH, "Cost_Net": (f_net_p/1000)*NETWORK_RATE_MWH, "Cost_En": f_en_c, "Total": f_en_c + (f_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((f_net_p/1000)*NETWORK_RATE_MWH)})
-
+        results.append({
+            "Setup": "ФАКТ", 
+            "Total Monthly kWh": round(f_kwh, 2), 
+            "Generating Peak (kW)": round(f_gen_p, 4), 
+            "Avg Assessment Peak (MW)": round(f_net_p / 1000, 4), 
+            "Generating cost": round(f_gen_p * KW_TO_MWH * TOTAL_RATE_MWH, 2), 
+            "Max network charge": round((f_net_p / 1000) * NETWORK_RATE_MWH, 2), 
+            "Total Consumption Cost": round(f_en_c, 2), 
+            "GRAND TOTAL COST": round(f_en_c + (f_gen_p * KW_TO_MWH * TOTAL_RATE_MWH) + ((f_net_p / 1000) * NETWORK_RATE_MWH), 2)
+        })
         # MODULES LOOP
         # --- FIXED MODULES LOOP ---
         # 1. Define base configs for everyone
