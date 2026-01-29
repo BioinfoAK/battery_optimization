@@ -132,14 +132,33 @@ if u_input:
         df_ref = pd.read_excel(f"reference_data/{REGION_PATH}/hours/generating_hours_{month_choice.lower()}.xlsx")
         df_ref.iloc[:, 0] = pd.to_datetime(df_ref.iloc[:, 0], dayfirst=True).dt.date
     
+        # --- ROBUST MATCHING LOGIC ---
         green_masks = []
+        
+        # 1. Standardize the Reference Data dates to a list of strings
+        # We use .dt.strftime to ensure we are comparing '2025-01-01' to '2025-01-01'
+        df_ref_clean = df_ref.copy()
+        df_ref_clean.iloc[:, 0] = pd.to_datetime(df_ref_clean.iloc[:, 0]).dt.strftime('%Y-%m-%d')
+        ref_lookup = df_ref_clean.set_index(df_ref_clean.columns[0]).to_dict('index')
+
         for _, row in df_raw.iterrows():
-            d = pd.to_datetime(row.iloc[0]).date()
-            match = df_ref[pd.to_datetime(df_ref.iloc[:, 0]).dt.date == d]
+            # 2. Standardize current row date to string
+            d_str = row.iloc[0].strftime('%Y-%m-%d')
+            
             h_m = {h: False for h in range(24)}
-            if not match.empty:
-                h_idx = int(float(match.iloc[0, 1])) - 1
-                if 0 <= h_idx <= 23: h_m[h_idx] = True
+            
+            # 3. Check if this date exists in our lookup
+            if d_str in ref_lookup:
+                # Get the hour value (ensure it's a clean integer)
+                try:
+                    # ref_lookup[d_str] returns the row. We want the second column value.
+                    val = list(ref_lookup[d_str].values())[0]
+                    h_idx = int(float(val)) - 1
+                    if 0 <= h_idx <= 23:
+                        h_m[h_idx] = True
+                except:
+                    pass # Skip if hour data is corrupted
+                    
             green_masks.append(h_m)
 
         results = []; excel_sheets = {"Baseline": df_raw}
