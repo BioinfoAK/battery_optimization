@@ -211,11 +211,21 @@ if u_input:
             s_gen_p = np.mean(s_gen_peaks) if s_gen_peaks else 0
             s_en_c = sum(row[HR_COLS[h]] * (price_map[row.iloc[0].day][price_cols[h]]/1000) for _, row in df_sim.iterrows() if row.iloc[0].day in price_map for h in range(24))
             
-            label = f"{m}_Modules" + ("_NoGen" if is_no_gen else "")
+            # --- Updated Append inside the Loop ---
+            label = f"{m}_Modules {round(cap, 1)}kWh" + ("_NoGen" if is_no_gen else "")
+
+            # Calculate grand total for the dictionary
+            grand_total = s_en_c + (s_gen_p * KW_TO_MWH * TOTAL_RATE_MWH) + ((s_net_p / 1000) * NETWORK_RATE_MWH)
+
             results.append({
-                "Setup": label, "kWh": s_kwh, "Gen_kW": s_gen_p, "Net_kW": s_net_p/1000, 
-                "Cost_Gen": s_gen_p*KW_TO_MWH*TOTAL_RATE_MWH, "Cost_Net": (s_net_p/1000)*NETWORK_RATE_MWH, 
-                "Cost_En": s_en_c, "Total": s_en_c + (s_gen_p*KW_TO_MWH*TOTAL_RATE_MWH) + ((s_net_p/1000)*NETWORK_RATE_MWH)
+                "Setup": label, 
+                "Total Monthly kWh": round(s_kwh, 2), 
+                "Generating Peak (kW)": round(s_gen_p, 4), 
+                "Avg Assessment Peak (MW)": round(s_net_p / 1000, 4), 
+                "Generating cost": round(s_gen_p * KW_TO_MWH * TOTAL_RATE_MWH, 2), 
+                "Max network charge": round((s_net_p / 1000) * NETWORK_RATE_MWH, 2), 
+                "Total Consumption Cost": round(s_en_c, 2), 
+                "GRAND TOTAL COST": round(grand_total, 2)
             })
             excel_sheets[f"{label}_Load"] = df_sim
             excel_sheets[f"{label}_Schedule"] = df_sch
@@ -225,7 +235,7 @@ if u_input:
         
         v_report = [
             {"": "Потребление", **{c: "" for c in v_cols}},
-            {"": "Объем потребления, кВт×ч", **{r['Setup']: r['kWh'] for r in results}},
+            {"": "Объем потребления, кВт×ч", **{r['Setup']: r['Total Monthly kWh'] for r in results}},
             {"": "Генераторная мощность, кВт", **{r['Setup']: r['Generating Peak (kW)'] for r in results}},
             {"": "Сетевая мощность, кВт", **{r['Setup']: round(r['Avg Assessment Peak (MW)']*1000, 2) for r in results}},
             {"": "", **{c: "" for c in v_cols}},
