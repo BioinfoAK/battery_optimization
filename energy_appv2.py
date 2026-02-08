@@ -28,7 +28,7 @@ if not check_password():
 # --- 2. SIDEBAR CONFIG ---
 st.sidebar.header("Параметры объекта")
 region_choice = st.sidebar.radio("Выберите регион:", ["Samara", "Ulyanovsk", "Kaliningrad"])
-month_choice = st.sidebar.selectbox("Выберите месяц:", ["jan25", "feb25", "mar25", "apr25", "may25", "jun25", "jul25", "aug25", "sep25", "oct25", "nov25", "dec25", "jan26"])
+month_choice = st.sidebar.selectbox("Выберите месяц:", ["jan25", "feb25", "mar25", "apr25", "may25", "jun25", "jul25", "aug25", "sep25", "oct25", "nov25", "dec25", "jan26", "test1"])
 
 REGION_PATH = region_choice.lower()
 try:
